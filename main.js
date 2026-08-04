@@ -90,24 +90,8 @@ form.addEventListener('submit', async (event) => {
 });
 
 window.addEventListener('resize', () => {
-  if (!lastRenderData) return;
-  if (lastRenderData.mode === 'single') {
-    const sd = lastRenderData.stockDataArr[0];
-    const c = document.getElementById('price-chart');
-    const r = document.getElementById('rsi-chart');
-    const m = document.getElementById('macd-chart');
-    if (c) drawPriceChart(c, sd.priceData, sd.sma20, sd.sma50);
-    if (m) drawMACDChart(m, sd.macd, sd.priceData);
-    if (r) drawRSIChart(r, sd.rsi14);
-  } else {
-    const { stockDataArr, optResult } = lastRenderData;
-    const c = document.getElementById('comparison-chart');
-    const rc = document.getElementById('rolling-corr-chart');
-    const wc = document.getElementById('weights-chart');
-    if (c) drawComparisonChart(c, stockDataArr);
-    if (rc) drawRollingCorrelChart(rc, stockDataArr);
-    if (wc && optResult) drawWeightsChart(wc, stockDataArr.map(s => s.ticker), optResult.weights);
-  }
+  const activeTab = document.querySelector('.tab-btn.active')?.dataset.tab;
+  if (activeTab) redrawTab(activeTab);
 });
 
 // ─── Data fetching ────────────────────────────────────────────────────────────
@@ -495,6 +479,50 @@ function signClass(v) {
   return v >= 0 ? 'positive' : 'negative';
 }
 
+// ─── Tab system ───────────────────────────────────────────────────────────────
+
+function redrawTab(tabId) {
+  if (!lastRenderData) return;
+  const { mode, stockDataArr, optResult } = lastRenderData;
+  if (mode === 'single') {
+    if (tabId === 'charts') {
+      const sd = stockDataArr[0];
+      const c = document.getElementById('price-chart');
+      const m = document.getElementById('macd-chart');
+      const r = document.getElementById('rsi-chart');
+      if (c) drawPriceChart(c, sd.priceData, sd.sma20, sd.sma50);
+      if (m) drawMACDChart(m, sd.macd, sd.priceData);
+      if (r) drawRSIChart(r, sd.rsi14);
+    }
+  } else {
+    if (tabId === 'performance') {
+      const c = document.getElementById('comparison-chart');
+      if (c) drawComparisonChart(c, stockDataArr);
+    } else if (tabId === 'correlation') {
+      const rc = document.getElementById('rolling-corr-chart');
+      if (rc) drawRollingCorrelChart(rc, stockDataArr);
+    } else if (tabId === 'portfolio' && optResult) {
+      const wc = document.getElementById('weights-chart');
+      if (wc) drawWeightsChart(wc, stockDataArr.map(s => s.ticker), optResult.weights);
+    }
+  }
+}
+
+function setupTabs() {
+  const nav = document.querySelector('.tab-nav');
+  if (!nav) return;
+  nav.addEventListener('click', (e) => {
+    const btn = e.target.closest('.tab-btn');
+    if (!btn) return;
+    const tabId = btn.dataset.tab;
+    nav.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b === btn));
+    document.querySelectorAll('.tab-panel').forEach(p => {
+      p.classList.toggle('active', p.id === `tab-${tabId}`);
+    });
+    redrawTab(tabId);
+  });
+}
+
 // ─── Single ticker rendering ──────────────────────────────────────────────────
 
 function renderSingle(stockData, noteData, earningsNote) {
@@ -537,32 +565,48 @@ function renderSingle(stockData, noteData, earningsNote) {
     aiHtml = `<div class="note-panel"><h3>Research note</h3><p class="note">${fallback}</p><p class="disclaimer">AI-generated — not financial advice.</p></div>`;
   }
 
+  const hasEarnings = !!stockData.earningsData;
+
   results.innerHTML = `
     <div class="ticker-header">
       <h2>${ticker} <span class="latest-price">$${m.latest.close.toFixed(2)}</span></h2>
       <span class="date-range">${m.first.date} – ${m.latest.date} · ${priceData.length} days</span>
     </div>
     <div class="metrics-grid">${cards}</div>
-    <div class="chart-panel">
-      <canvas id="price-chart" class="chart-canvas"></canvas>
-      <div class="legend">
-        <span><i class="dot dot-close"></i>Close</span>
-        <span><i class="dot dot-sma20"></i>SMA ${cfg.sma1Period}</span>
-        <span><i class="dot dot-sma50"></i>SMA ${cfg.sma2Period}</span>
+
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="charts">Charts</button>
+      <button class="tab-btn" data-tab="research">AI Research</button>
+      ${hasEarnings ? '<button class="tab-btn" data-tab="earnings">Earnings</button>' : ''}
+    </nav>
+
+    <div class="tab-panel active" id="tab-charts">
+      <div class="chart-panel">
+        <canvas id="price-chart" class="chart-canvas"></canvas>
+        <div class="legend">
+          <span><i class="dot dot-close"></i>Close</span>
+          <span><i class="dot dot-sma20"></i>SMA ${cfg.sma1Period}</span>
+          <span><i class="dot dot-sma50"></i>SMA ${cfg.sma2Period}</span>
+        </div>
+      </div>
+      <div class="macd-panel">
+        <canvas id="macd-chart" class="macd-canvas"></canvas>
+        <div class="rsi-legend">MACD(12,26,9) · <span style="color:#4e9af1">MACD line</span> · <span style="color:#f4b942">signal line</span> · histogram</div>
+      </div>
+      <div class="rsi-panel">
+        <canvas id="rsi-chart" class="rsi-canvas"></canvas>
+        <div class="rsi-legend">RSI(${cfg.rsiPeriod}) · <span class="rsi-oversold">oversold &lt;30</span> · <span class="rsi-overbought">overbought &gt;70</span></div>
       </div>
     </div>
-    <div class="macd-panel">
-      <canvas id="macd-chart" class="macd-canvas"></canvas>
-      <div class="rsi-legend">MACD(12,26,9) · <span style="color:#4e9af1">MACD line</span> · <span style="color:#f4b942">signal line</span> · histogram</div>
+
+    <div class="tab-panel" id="tab-research">
+      ${aiHtml}
     </div>
-    <div class="rsi-panel">
-      <canvas id="rsi-chart" class="rsi-canvas"></canvas>
-      <div class="rsi-legend">RSI(${cfg.rsiPeriod}) · <span class="rsi-oversold">oversold &lt;30</span> · <span class="rsi-overbought">overbought &gt;70</span></div>
-    </div>
-    ${aiHtml}
-    ${stockData.earningsData ? renderEarningsPanel(stockData.earningsData, earningsNote) : ''}
+
+    ${hasEarnings ? `<div class="tab-panel" id="tab-earnings">${renderEarningsPanel(stockData.earningsData, earningsNote)}</div>` : ''}
   `;
 
+  setupTabs();
   drawPriceChart(document.getElementById('price-chart'), priceData, sma20, sma50);
   drawMACDChart(document.getElementById('macd-chart'), macd, priceData);
   drawRSIChart(document.getElementById('rsi-chart'), rsi14);
