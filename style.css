@@ -1,9 +1,14 @@
 :root {
-  --ink: #14213d;
-  --paper: #fafaf7;
-  --line: #d8d3c4;
-  --accent: #9a6b2c;
-  --error: #a6302c;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --ink: #ffffff;
+  --muted: #c3c2b7;
+  --faint: #898781;
+  --line: #2c2c2a;
+  --border: rgba(255, 255, 255, 0.1);
+  --accent: #d95926;
+  --error: #e66767;
+  --positive: #0ca30c;
 }
 
 * {
@@ -12,7 +17,7 @@
 
 body {
   margin: 0;
-  background: var(--paper);
+  background: var(--page);
   color: var(--ink);
   font-family: 'Georgia', 'Iowan Old Style', serif;
   line-height: 1.5;
@@ -37,7 +42,7 @@ body {
 }
 
 .app-main {
-  max-width: 640px;
+  max-width: 960px;
   margin: 0 auto;
   padding: 1.5rem;
   display: grid;
@@ -45,10 +50,10 @@ body {
 }
 
 .panel {
-  border: 1px solid var(--line);
-  border-radius: 4px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   padding: 1.25rem;
-  background: white;
+  background: var(--surface);
 }
 
 form {
@@ -61,22 +66,28 @@ label {
   font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--ink);
+  color: var(--muted);
 }
 
 input {
   padding: 0.5rem;
-  border: 1px solid var(--line);
+  border: 1px solid var(--border);
   border-radius: 3px;
+  background: var(--page);
+  color: var(--ink);
   font-size: 1rem;
   font-family: inherit;
+}
+
+input::placeholder {
+  color: var(--faint);
 }
 
 button {
   margin-top: 0.5rem;
   padding: 0.6rem 1rem;
   background: var(--ink);
-  color: var(--paper);
+  color: var(--page);
   border: none;
   border-radius: 3px;
   font-size: 1rem;
@@ -86,10 +97,11 @@ button {
 
 button:hover {
   background: var(--accent);
+  color: var(--ink);
 }
 
 .placeholder {
-  color: #8a8577;
+  color: var(--faint);
   font-style: italic;
 }
 
@@ -97,7 +109,7 @@ button:hover {
   margin: 0 0 0.5rem;
   font-size: 0.75rem;
   font-style: italic;
-  color: #8a8577;
+  color: var(--faint);
 }
 
 .field-hint a {
@@ -109,9 +121,103 @@ button:hover {
 }
 
 .app-footer {
-  max-width: 640px;
+  max-width: 960px;
   margin: 0 auto;
   padding: 0 1.5rem 2rem;
   font-size: 0.85rem;
-  color: #8a8577;
+  color: var(--faint);
+}
+
+#results h2 {
+  margin: 0 0 1rem;
+}
+
+.stat-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.75rem;
+  margin-bottom: 1.5rem;
+}
+
+.stat-card {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  background: var(--page);
+}
+
+.stat-label {
+  font-family: 'Menlo', 'Courier New', monospace;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--faint);
+}
+
+.stat-value {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.stat-value.positive {
+  color: var(--positive);
+}
+
+.stat-value.negative {
+  color: var(--error);
+}
+
+.stat-sub {
+  font-size: 0.7rem;
+  color: var(--faint);
+}
+
+.chart-panel {
+  margin-bottom: 1.5rem;
+}
+
+.chart-canvas {
+  width: 100%;
+  height: 320px;
+  display: block;
+}
+
+.legend {
+  display: flex;
+  gap: 1.25rem;
+  margin-top: 0.5rem;
+  font-size: 0.8rem;
+  color: var(--muted);
+  align-items: center;
+}
+
+.legend .dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 0.35rem;
+  vertical-align: middle;
+}
+
+.dot-close {
+  background: var(--ink);
+}
+
+.dot-sma20 {
+  background: var(--accent);
+}
+
+.dot-sma50 {
+  background: var(--error);
+}
+
+.note-panel h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+  color: var(--ink);
 }
