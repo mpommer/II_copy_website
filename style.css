@@ -587,3 +587,70 @@ select:focus, input:focus { outline: 1px solid var(--accent); }
   font-style: italic;
   line-height: 1.45;
 }
+
+/* ── MACD chart ──────────────────────────────────────────── */
+
+.macd-panel { margin-bottom: 1.5rem; }
+
+.macd-canvas {
+  width: 100%;
+  height: 160px;
+  display: block;
+}
+
+/* ── Rolling correlation ─────────────────────────────────── */
+
+.rolling-corr-panel { margin-bottom: 1.5rem; }
+
+/* ── Portfolio optimization ──────────────────────────────── */
+
+.opt-panel { margin-bottom: 1.5rem; }
+
+.opt-layout {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (max-width: 560px) {
+  .opt-layout { grid-template-columns: 1fr; }
+}
+
+.opt-stats {
+  display: flex;
+  gap: 1.25rem;
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  font-family: 'Menlo', 'Courier New', monospace;
+  flex-wrap: wrap;
+}
+
+.opt-stats strong.positive { color: var(--positive); }
+.opt-stats strong.negative { color: var(--error); }
+.opt-stats strong.muted    { color: var(--muted); }
+
+.weights-chart-wrap { min-width: 0; }
+
+.weights-canvas {
+  width: 100%;
+  height: 180px;
+  display: block;
+}
+
+/* ── Risk factors list ───────────────────────────────────── */
+
+.risk-list {
+  margin: 0 0 1rem;
+  padding-left: 1.5rem;
+  color: var(--muted);
+  line-height: 1.65;
+}
+
+.risk-list li + li { margin-top: 0.4rem; }
+
+/* ── Note panel with multiple sections ──────────────────── */
+
+.note-panel h3 { margin: 1rem 0 0.5rem; }
+.note-panel h3:first-child { margin-top: 0; }

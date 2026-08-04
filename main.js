@@ -1,12 +1,14 @@
-// Stock Dashboard — multi-ticker, risk metrics, RSI, earnings intelligence.
+// Stock Dashboard — multi-ticker, RSI, MACD, portfolio optimization, rolling correlations.
 // API keys are entered at runtime; nothing secret is committed here.
 
 const TICKER_COLORS = ['#f2f2f0', '#4e9af1', '#76c442', '#f4b942', '#e668a7'];
 const EARNINGS_TICKERS = new Set(['AAPL']);
 let lastRenderData = null;
 
-// Shared settings, updated on each submit so render helpers can reference them
-let cfg = { outputsize: 130, interval: '1day', benchmark: 'SPY', rsiPeriod: 14, sma1Period: 20, sma2Period: 50 };
+let cfg = {
+  outputsize: 130, interval: '1day', benchmark: 'SPY',
+  rsiPeriod: 14, sma1Period: 20, sma2Period: 50, optMethod: 'maxSharpe',
+};
 
 const form = document.getElementById('ticker-form');
 const results = document.getElementById('results');
@@ -15,7 +17,7 @@ form.addEventListener('submit', async (event) => {
   event.preventDefault();
 
   const raw = document.getElementById('tickers').value;
-  const tickers = raw.split(',').map((t) => t.trim().toUpperCase()).filter(Boolean).slice(0, 5);
+  const tickers = raw.split(',').map(t => t.trim().toUpperCase()).filter(Boolean).slice(0, 5);
   if (!tickers.length) return;
 
   const rfRateInput = parseFloat(document.getElementById('rfrate').value);
@@ -31,23 +33,21 @@ form.addEventListener('submit', async (event) => {
     rsiPeriod: Math.max(2, parseInt(document.getElementById('rsi-period').value, 10) || 14),
     sma1Period: Math.max(2, parseInt(document.getElementById('sma1').value, 10) || 20),
     sma2Period: Math.max(2, parseInt(document.getElementById('sma2').value, 10) || 50),
+    optMethod: document.getElementById('opt-method').value || 'maxSharpe',
   };
 
   const spyTicker = cfg.benchmark;
-  const fetchTickers = tickers.includes(spyTicker)
-    ? tickers
-    : [...tickers, spyTicker];
+  const fetchTickers = tickers.includes(spyTicker) ? tickers : [...tickers, spyTicker];
 
   results.innerHTML = `<p class="status-loading">Fetching price data for ${tickers.join(', ')} + ${cfg.benchmark} (for beta)…</p>`;
 
   try {
-    // Fetch price + earnings in parallel
-    const pricePromises = fetchTickers.map((t) => fetchPriceData(t, twelveDataKey, cfg.outputsize, cfg.interval));
-    const earningsPromises = tickers.map((t) => fetchEarningsData(t));
+    const pricePromises = fetchTickers.map(t => fetchPriceData(t, twelveDataKey, cfg.outputsize, cfg.interval));
+    const earningsPromises = tickers.map(t => fetchEarningsData(t));
 
     const [allPriceResults, allEarningsResults] = await Promise.all([
       Promise.all(pricePromises),
-      Promise.all(earningsPromises)
+      Promise.all(earningsPromises),
     ]);
 
     const priceMap = {};
@@ -56,17 +56,17 @@ form.addEventListener('submit', async (event) => {
     tickers.forEach((t, i) => { earningsMap[t] = allEarningsResults[i]; });
 
     const spyData = priceMap[spyTicker];
-    const spyReturns = calculateReturns(spyData).filter((r) => r !== null);
+    const spyReturns = calculateReturns(spyData).filter(r => r !== null);
 
-    // Build stockData array
-    const stockDataArr = tickers.map((ticker) => {
+    const stockDataArr = tickers.map(ticker => {
       const priceData = priceMap[ticker];
       const returns = calculateReturns(priceData);
       const sma20 = calculateSMA(priceData, cfg.sma1Period);
       const sma50 = calculateSMA(priceData, cfg.sma2Period);
       const rsi14 = calculateRSI(priceData, cfg.rsiPeriod);
+      const macd = calculateMACD(priceData);
       const metrics = computeMetrics(priceData, returns, sma20, sma50, rsi14, spyReturns, rfRate);
-      return { ticker, priceData, returns, sma20, sma50, rsi14, metrics, earningsData: earningsMap[ticker] };
+      return { ticker, priceData, returns, sma20, sma50, rsi14, macd, metrics, earningsData: earningsMap[ticker] };
     });
 
     results.innerHTML = `<p class="status-loading">Generating AI analysis…</p>`;
@@ -75,13 +75,14 @@ form.addEventListener('submit', async (event) => {
       const sd = stockDataArr[0];
       const llmCalls = [getResearchNote(sd, openRouterKey)];
       if (sd.earningsData) llmCalls.push(getEarningsNote(sd.ticker, sd.earningsData, openRouterKey));
-      const [note, earningsNote] = await Promise.all(llmCalls);
-      lastRenderData = { mode: 'single', stockDataArr, note, earningsNote: earningsNote ?? null };
-      renderSingle(sd, note, earningsNote ?? null);
+      const [noteData, earningsNote] = await Promise.all(llmCalls);
+      lastRenderData = { mode: 'single', stockDataArr, noteData, earningsNote: earningsNote ?? null };
+      renderSingle(sd, noteData, earningsNote ?? null);
     } else {
-      const note = await getComparisonNote(stockDataArr, rfRate, openRouterKey);
-      lastRenderData = { mode: 'comparison', stockDataArr, note };
-      renderComparison(stockDataArr, note);
+      const optResult = optimizePortfolio(stockDataArr, rfRate, cfg.optMethod);
+      const note = await getComparisonNote(stockDataArr, rfRate, openRouterKey, optResult);
+      lastRenderData = { mode: 'comparison', stockDataArr, note, optResult };
+      renderComparison(stockDataArr, note, optResult);
     }
   } catch (err) {
     results.innerHTML = `<div class="alert"><strong>Something went wrong.</strong> ${err.message}</div>`;
@@ -91,14 +92,21 @@ form.addEventListener('submit', async (event) => {
 window.addEventListener('resize', () => {
   if (!lastRenderData) return;
   if (lastRenderData.mode === 'single') {
-    const canvas = document.getElementById('price-chart');
-    const rsiCanvas = document.getElementById('rsi-chart');
-    const { stockDataArr } = lastRenderData;
-    if (canvas) drawPriceChart(canvas, stockDataArr[0].priceData, stockDataArr[0].sma20, stockDataArr[0].sma50);
-    if (rsiCanvas) drawRSIChart(rsiCanvas, stockDataArr[0].rsi14);
+    const sd = lastRenderData.stockDataArr[0];
+    const c = document.getElementById('price-chart');
+    const r = document.getElementById('rsi-chart');
+    const m = document.getElementById('macd-chart');
+    if (c) drawPriceChart(c, sd.priceData, sd.sma20, sd.sma50);
+    if (m) drawMACDChart(m, sd.macd, sd.priceData);
+    if (r) drawRSIChart(r, sd.rsi14);
   } else {
-    const canvas = document.getElementById('comparison-chart');
-    if (canvas) drawComparisonChart(canvas, lastRenderData.stockDataArr);
+    const { stockDataArr, optResult } = lastRenderData;
+    const c = document.getElementById('comparison-chart');
+    const rc = document.getElementById('rolling-corr-chart');
+    const wc = document.getElementById('weights-chart');
+    if (c) drawComparisonChart(c, stockDataArr);
+    if (rc) drawRollingCorrelChart(rc, stockDataArr);
+    if (wc && optResult) drawWeightsChart(wc, stockDataArr.map(s => s.ticker), optResult.weights);
   }
 });
 
@@ -115,8 +123,8 @@ async function fetchPriceData(ticker, apiKey, outputsize = 130, interval = '1day
   const values = raw.values ?? [];
   if (!values.length) throw new Error(`No price data returned for ${ticker}`);
   return values
-    .map((b) => ({ date: b.datetime, open: Number(b.open), high: Number(b.high), low: Number(b.low), close: Number(b.close), volume: Number(b.volume) }))
-    .sort((a, b) => (a.date < b.date ? -1 : 1));
+    .map(b => ({ date: b.datetime, open: Number(b.open), high: Number(b.high), low: Number(b.low), close: Number(b.close), volume: Number(b.volume) }))
+    .sort((a, b) => a.date < b.date ? -1 : 1);
 }
 
 async function fetchEarningsData(ticker) {
@@ -146,26 +154,64 @@ function calculateSMA(priceData, window) {
   });
 }
 
+function calculateEMA(priceData, period) {
+  const ema = new Array(priceData.length).fill(null);
+  if (priceData.length < period) return ema;
+  const k = 2 / (period + 1);
+  let sum = 0;
+  for (let i = 0; i < period; i++) sum += priceData[i].close;
+  ema[period - 1] = sum / period;
+  for (let i = period; i < priceData.length; i++) {
+    ema[i] = priceData[i].close * k + ema[i - 1] * (1 - k);
+  }
+  return ema;
+}
+
+function calculateMACD(priceData) {
+  const ema12 = calculateEMA(priceData, 12);
+  const ema26 = calculateEMA(priceData, 26);
+  const macdLine = priceData.map((_, i) =>
+    ema12[i] != null && ema26[i] != null ? ema12[i] - ema26[i] : null
+  );
+
+  const signalLine = new Array(priceData.length).fill(null);
+  const macdStart = macdLine.findIndex(v => v != null);
+  if (macdStart < 0) return { macdLine, signalLine, histogram: new Array(priceData.length).fill(null) };
+
+  const sigPeriod = 9;
+  const k = 2 / (sigPeriod + 1);
+  let count = 0, sum = 0, firstSigIdx = -1;
+  for (let i = macdStart; i < macdLine.length; i++) {
+    sum += macdLine[i];
+    count++;
+    if (count === sigPeriod) { signalLine[i] = sum / sigPeriod; firstSigIdx = i; break; }
+  }
+  if (firstSigIdx >= 0) {
+    for (let i = firstSigIdx + 1; i < macdLine.length; i++) {
+      signalLine[i] = macdLine[i] * k + signalLine[i - 1] * (1 - k);
+    }
+  }
+
+  const histogram = macdLine.map((v, i) =>
+    v != null && signalLine[i] != null ? v - signalLine[i] : null
+  );
+
+  return { macdLine, signalLine, histogram };
+}
+
 function calculateRSI(priceData, period = 14) {
   const rsi = new Array(priceData.length).fill(null);
   if (priceData.length < period + 1) return rsi;
-
   const changes = priceData.map((bar, i) => i === 0 ? 0 : bar.close - priceData[i - 1].close);
-
-  // Initial averages using simple mean over first `period` changes
-  let avgGain = 0;
-  let avgLoss = 0;
+  let avgGain = 0, avgLoss = 0;
   for (let i = 1; i <= period; i++) {
     if (changes[i] > 0) avgGain += changes[i];
     else avgLoss += Math.abs(changes[i]);
   }
   avgGain /= period;
   avgLoss /= period;
-
   const rs0 = avgLoss === 0 ? Infinity : avgGain / avgLoss;
   rsi[period] = avgLoss === 0 ? 100 : 100 - 100 / (1 + rs0);
-
-  // Wilder smoothing
   for (let i = period + 1; i < priceData.length; i++) {
     const gain = changes[i] > 0 ? changes[i] : 0;
     const loss = changes[i] < 0 ? Math.abs(changes[i]) : 0;
@@ -196,15 +242,26 @@ function pearsonCorrelation(xs, ys) {
   return denom === 0 ? null : num / denom;
 }
 
+function rollingCorrelation(xs, ys, window) {
+  const n = Math.min(xs.length, ys.length);
+  const result = new Array(n).fill(null);
+  for (let i = window - 1; i < n; i++) {
+    const xSlice = xs.slice(i - window + 1, i + 1);
+    const ySlice = ys.slice(i - window + 1, i + 1);
+    result[i] = pearsonCorrelation(xSlice, ySlice);
+  }
+  return result;
+}
+
 function computeMetrics(priceData, returns, sma20, sma50, rsi14, spyReturns, rfRate) {
   const first = priceData[0];
   const latest = priceData[priceData.length - 1];
   const periodReturn = (latest.close - first.close) / first.close;
-  const periodHigh = Math.max(...priceData.map((b) => b.high));
-  const periodLow = Math.min(...priceData.map((b) => b.low));
+  const periodHigh = Math.max(...priceData.map(b => b.high));
+  const periodLow = Math.min(...priceData.map(b => b.low));
   const avgVolume = priceData.reduce((s, b) => s + b.volume, 0) / priceData.length;
 
-  const cleanReturns = returns.filter((r) => r !== null);
+  const cleanReturns = returns.filter(r => r !== null);
   const n = cleanReturns.length;
   const mean = n > 0 ? cleanReturns.reduce((a, b) => a + b, 0) / n : 0;
   const variance = n > 1 ? cleanReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / (n - 1) : 0;
@@ -214,20 +271,17 @@ function computeMetrics(priceData, returns, sma20, sma50, rsi14, spyReturns, rfR
   const annualizedVol = dailyVol * Math.sqrt(annFactor);
 
   const rfPeriodic = rfRate / annFactor;
-  const excessReturns = cleanReturns.map((r) => r - rfPeriodic);
+  const excessReturns = cleanReturns.map(r => r - rfPeriodic);
   const excessMean = excessReturns.reduce((a, b) => a + b, 0) / excessReturns.length;
   const sharpe = annualizedVol > 0 ? (excessMean * 252) / annualizedVol : null;
 
-  // Max drawdown
-  let peak = priceData[0].close;
-  let maxDD = 0;
+  let peak = priceData[0].close, maxDD = 0;
   for (const bar of priceData) {
     if (bar.close > peak) peak = bar.close;
     const dd = (bar.close - peak) / peak;
     if (dd < maxDD) maxDD = dd;
   }
 
-  // Beta vs SPY
   let beta = null;
   if (spyReturns && spyReturns.length >= 5) {
     const len = Math.min(cleanReturns.length, spyReturns.length);
@@ -243,17 +297,66 @@ function computeMetrics(priceData, returns, sma20, sma50, rsi14, spyReturns, rfR
     beta = spyVar > 0 ? cov / spyVar : null;
   }
 
-  const latestSma20 = [...sma20].reverse().find((v) => v != null) ?? null;
-  const latestSma50 = [...sma50].reverse().find((v) => v != null) ?? null;
+  const latestSma20 = [...sma20].reverse().find(v => v != null) ?? null;
+  const latestSma50 = [...sma50].reverse().find(v => v != null) ?? null;
   let signal = 'Neutral';
   if (latestSma20 != null && latestSma50 != null) {
     if (latestSma20 > latestSma50) signal = `Bullish (SMA${cfg.sma1Period} > SMA${cfg.sma2Period})`;
     else if (latestSma20 < latestSma50) signal = `Bearish (SMA${cfg.sma1Period} < SMA${cfg.sma2Period})`;
   }
 
-  const rsiLatest = [...rsi14].reverse().find((v) => v != null) ?? null;
+  const rsiLatest = [...rsi14].reverse().find(v => v != null) ?? null;
 
   return { first, latest, periodReturn, periodHigh, periodLow, avgVolume, annualizedReturn, annualizedVol, sharpe, maxDrawdown: maxDD, beta, latestSma20, latestSma50, signal, rsiLatest };
+}
+
+function optimizePortfolio(stockDataArr, rfRate, method = 'maxSharpe') {
+  const n = stockDataArr.length;
+  if (n < 2) return null;
+
+  const annFactor = cfg.interval === '1week' ? 52 : 252;
+  const returnArrays = stockDataArr.map(s => s.returns.filter(r => r !== null));
+  const minLen = Math.min(...returnArrays.map(r => r.length));
+  const aligned = returnArrays.map(r => r.slice(r.length - minLen));
+  const means = aligned.map(r => r.reduce((a, b) => a + b, 0) / r.length);
+
+  const cov = Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => {
+      let c = 0;
+      for (let k = 0; k < minLen; k++) c += (aligned[i][k] - means[i]) * (aligned[j][k] - means[j]);
+      return c / (minLen - 1);
+    })
+  );
+
+  const portStats = (w) => {
+    let portVar = 0;
+    for (let i = 0; i < n; i++)
+      for (let j = 0; j < n; j++)
+        portVar += w[i] * w[j] * cov[i][j];
+    const portVol = Math.sqrt(portVar * annFactor);
+    const portReturn = means.reduce((s, m, i) => s + w[i] * m, 0) * annFactor;
+    const sharpe = portVol > 0 ? (portReturn - rfRate) / portVol : -Infinity;
+    return { portVar, portVol, portReturn, sharpe };
+  };
+
+  let bestWeights = null;
+  let bestMetric = method === 'minVariance' ? Infinity : -Infinity;
+
+  for (let iter = 0; iter < 5000; iter++) {
+    // Exponential random vars normalised = uniform Dirichlet sample
+    const raw = Array.from({ length: n }, () => -Math.log(Math.random() + 1e-10));
+    const sum = raw.reduce((a, b) => a + b, 0);
+    const w = raw.map(v => v / sum);
+    const { portVar, sharpe } = portStats(w);
+    const metric = method === 'minVariance' ? portVar : sharpe;
+    if (method === 'minVariance' ? metric < bestMetric : metric > bestMetric) {
+      bestMetric = metric;
+      bestWeights = w;
+    }
+  }
+
+  const { portVol, portReturn, sharpe } = portStats(bestWeights);
+  return { weights: bestWeights, annualizedReturn: portReturn, annualizedVol: portVol, sharpe, method };
 }
 
 // ─── LLM calls ────────────────────────────────────────────────────────────────
@@ -278,44 +381,69 @@ async function callOpenRouter(apiKey, system, user) {
 }
 
 async function getResearchNote(stockData, apiKey) {
-  const { ticker, priceData, metrics } = stockData;
-  const m = metrics;
+  const { ticker, priceData, metrics: m } = stockData;
   const pct = (v, d = 1) => `${(v * 100).toFixed(d)}%`;
   const prompt =
     `${ticker} — ${priceData.length} trading days from ${m.first.date} to ${m.latest.date}.\n` +
     `Latest close: $${m.latest.close.toFixed(2)}. Period return: ${pct(m.periodReturn)}. ` +
     `Annualized return: ${pct(m.annualizedReturn)}. Annualized volatility: ${pct(m.annualizedVol)}.\n` +
     `Sharpe ratio: ${m.sharpe != null ? m.sharpe.toFixed(2) : 'n/a'}. Max drawdown: ${pct(m.maxDrawdown)}. ` +
-    `Beta vs SPY: ${m.beta != null ? m.beta.toFixed(2) : 'n/a'}.\n` +
-    `RSI(${cfg.rsiPeriod}): ${m.rsiLatest != null ? m.rsiLatest.toFixed(1) : 'n/a'}. SMA signal: ${m.signal}.\n` +
-    `Beta vs ${cfg.benchmark}: ${m.beta != null ? m.beta.toFixed(2) : 'n/a'}. Interval: ${cfg.interval === '1week' ? 'weekly' : 'daily'}.\n\n` +
-    `Write a concise one-paragraph research note covering price action, momentum, and risk profile.`;
-  return callOpenRouter(apiKey, 'You are a concise financial research analyst. Be factual and specific.', prompt);
+    `Beta vs ${cfg.benchmark}: ${m.beta != null ? m.beta.toFixed(2) : 'n/a'}.\n` +
+    `RSI(${cfg.rsiPeriod}): ${m.rsiLatest != null ? m.rsiLatest.toFixed(1) : 'n/a'}. SMA signal: ${m.signal}.\n\n` +
+    `Respond with a JSON object (raw JSON only, no markdown fences) with exactly these keys:\n` +
+    `- "signals": one paragraph explaining what the RSI and SMA signals currently indicate\n` +
+    `- "note": one paragraph covering price action, momentum, and risk profile\n` +
+    `- "risks": an array of exactly 3 concise risk factor strings`;
+  const raw = await callOpenRouter(
+    apiKey,
+    'You are a concise financial research analyst. Respond only with valid JSON, no markdown formatting.',
+    prompt
+  );
+  try {
+    const cleaned = raw.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '').trim();
+    return JSON.parse(cleaned);
+  } catch {
+    return { signals: raw, note: '', risks: [] };
+  }
 }
 
-async function getComparisonNote(stockDataArr, rfRate, apiKey) {
+async function getComparisonNote(stockDataArr, rfRate, apiKey, optResult) {
   const lines = stockDataArr.map(({ ticker, metrics: m }) => {
-    const pct = (v) => v != null ? `${(v * 100).toFixed(1)}%` : 'n/a';
+    const pct = v => v != null ? `${(v * 100).toFixed(1)}%` : 'n/a';
     return `${ticker}: return ${pct(m.periodReturn)}, ann.return ${pct(m.annualizedReturn)}, ` +
       `vol ${pct(m.annualizedVol)}, Sharpe ${m.sharpe != null ? m.sharpe.toFixed(2) : 'n/a'}, ` +
       `max DD ${pct(m.maxDrawdown)}, beta ${m.beta != null ? m.beta.toFixed(2) : 'n/a'}, ` +
       `RSI ${m.rsiLatest != null ? m.rsiLatest.toFixed(0) : 'n/a'}, signal: ${m.signal}`;
   }).join('\n');
+
+  let optSection = '';
+  if (optResult) {
+    const wLine = stockDataArr.map((s, i) => `${s.ticker}: ${(optResult.weights[i] * 100).toFixed(1)}%`).join(', ');
+    const methodLabel = optResult.method === 'minVariance' ? 'Minimum-Variance' : 'Maximum Sharpe Ratio';
+    optSection = `\n\n${methodLabel} portfolio: ${wLine} — ` +
+      `ann. return ${(optResult.annualizedReturn * 100).toFixed(1)}%, ` +
+      `vol ${(optResult.annualizedVol * 100).toFixed(1)}%, ` +
+      `Sharpe ${optResult.sharpe != null ? optResult.sharpe.toFixed(2) : 'n/a'}`;
+  }
+
   const prompt =
-    `Comparison of ${stockDataArr.map((s) => s.ticker).join(', ')} — ${cfg.outputsize}-${cfg.interval === '1week' ? 'week' : 'day'} window, ${cfg.interval === '1week' ? 'weekly' : 'daily'} data. Risk-free rate: ${(rfRate * 100).toFixed(1)}%.\n\n${lines}\n\n` +
+    `Comparison of ${stockDataArr.map(s => s.ticker).join(', ')} — ` +
+    `${cfg.outputsize} ${cfg.interval === '1week' ? 'weeks' : 'days'}, risk-free rate ${(rfRate * 100).toFixed(1)}%.\n\n` +
+    `${lines}${optSection}\n\n` +
     `Write three short paragraphs: ` +
     `(1) which stock had the best risk-adjusted return and why, ` +
-    `(2) what momentum signals (RSI, SMA) suggest about each, ` +
-    `(3) key risk differences (volatility, drawdown, beta).`;
+    `(2) what RSI and SMA momentum signals suggest about each, ` +
+    `(3) key risk differences (volatility, drawdown, beta)` +
+    (optResult ? ` and what the ${optResult.method === 'minVariance' ? 'min-variance' : 'max-Sharpe'} portfolio weights reveal about diversification` : '') + '.';
   return callOpenRouter(apiKey, 'You are a concise equity research analyst. Compare stocks objectively.', prompt);
 }
 
 async function getEarningsNote(ticker, earningsData, apiKey) {
   const { meta, sentiment, key_figures, forward_looking } = earningsData;
-  const companyDensity = sentiment.by_role.find((r) => r.role_group === 'Company')?.sentiment_density ?? 0;
-  const analystDensity = sentiment.by_role.find((r) => r.role_group === 'Analyst')?.sentiment_density ?? 0;
-  const figureLines = key_figures.slice(0, 8).map((f) => `• ${f.figure} — ${f.metric}`).join('\n');
-  const flsLines = forward_looking.slice(0, 6).map((f) => `[${f.speaker}] "${f.statement}"`).join('\n');
+  const companyDensity = sentiment.by_role.find(r => r.role_group === 'Company')?.sentiment_density ?? 0;
+  const analystDensity = sentiment.by_role.find(r => r.role_group === 'Analyst')?.sentiment_density ?? 0;
+  const figureLines = key_figures.slice(0, 8).map(f => `• ${f.figure} — ${f.metric}`).join('\n');
+  const flsLines = forward_looking.slice(0, 6).map(f => `[${f.speaker}] "${f.statement}"`).join('\n');
   const prompt =
     `Earnings call: ${ticker} ${meta.quarter} (${meta.report_date})\n\n` +
     `SENTIMENT: Overall ${sentiment.overall.label}. ${sentiment.overall.positive_count} positive phrases, ${sentiment.overall.negative_count} negative. ` +
@@ -355,8 +483,7 @@ function metricCardHtml(label, value, sub, valueClass) {
 
 function fmtPct(v, d = 1) {
   if (v == null) return '—';
-  const s = (v >= 0 ? '+' : '') + (v * 100).toFixed(d) + '%';
-  return s;
+  return (v >= 0 ? '+' : '') + (v * 100).toFixed(d) + '%';
 }
 
 function fmtNum(v, d = 2) {
@@ -370,15 +497,15 @@ function signClass(v) {
 
 // ─── Single ticker rendering ──────────────────────────────────────────────────
 
-function renderSingle(stockData, note, earningsNote) {
-  const { ticker, priceData, sma20, sma50, rsi14, metrics: m } = stockData;
+function renderSingle(stockData, noteData, earningsNote) {
+  const { ticker, priceData, sma20, sma50, rsi14, macd, metrics: m } = stockData;
 
   const rsiClass = m.rsiLatest == null ? 'muted' : m.rsiLatest > 70 ? 'warn' : m.rsiLatest < 30 ? 'positive' : 'muted';
   const rsiSub = m.rsiLatest == null ? '' : m.rsiLatest > 70 ? 'overbought' : m.rsiLatest < 30 ? 'oversold' : 'neutral';
   const sharpeClass = m.sharpe == null ? 'muted' : m.sharpe > 1 ? 'positive' : m.sharpe < 0 ? 'negative' : 'muted';
   const signalClass = m.signal.startsWith('Bullish') ? 'positive' : m.signal.startsWith('Bearish') ? 'negative' : 'muted';
-
   const periodUnit = cfg.interval === '1week' ? 'wk' : 'day';
+
   const cards = [
     metricCardHtml('Current price', `$${m.latest.close.toFixed(2)}`, `open $${m.first.close.toFixed(2)}`, 'muted'),
     metricCardHtml('Period high', `$${m.periodHigh.toFixed(2)}`, `${priceData.length}-${periodUnit} high`, 'positive'),
@@ -390,8 +517,25 @@ function renderSingle(stockData, note, earningsNote) {
     metricCardHtml('Max drawdown', fmtPct(m.maxDrawdown), 'peak to trough', 'negative'),
     metricCardHtml('Beta', fmtNum(m.beta), `vs ${cfg.benchmark}`, 'muted'),
     metricCardHtml(`RSI (${cfg.rsiPeriod})`, m.rsiLatest != null ? m.rsiLatest.toFixed(1) : '—', rsiSub, rsiClass),
-    metricCardHtml('SMA signal', m.signal, `SMA${cfg.sma1Period} ${m.latestSma20 != null ? '$' + m.latestSma20.toFixed(2) : '—'} · SMA${cfg.sma2Period} ${m.latestSma50 != null ? '$' + m.latestSma50.toFixed(2) : '—'}`, signalClass)
+    metricCardHtml('SMA signal', m.signal, `SMA${cfg.sma1Period} ${m.latestSma20 != null ? '$' + m.latestSma20.toFixed(2) : '—'} · SMA${cfg.sma2Period} ${m.latestSma50 != null ? '$' + m.latestSma50.toFixed(2) : '—'}`, signalClass),
   ].join('');
+
+  let aiHtml;
+  if (noteData && typeof noteData === 'object' && (noteData.signals || noteData.note)) {
+    const risksHtml = Array.isArray(noteData.risks) && noteData.risks.length
+      ? `<h3>Risk factors</h3><ol class="risk-list">${noteData.risks.map(r => `<li>${r}</li>`).join('')}</ol>`
+      : '';
+    aiHtml = `
+      <div class="note-panel">
+        ${noteData.signals ? `<h3>Signal analysis</h3><p class="note">${noteData.signals}</p>` : ''}
+        ${noteData.note ? `<h3>Research note</h3><p class="note">${noteData.note}</p>` : ''}
+        ${risksHtml}
+        <p class="disclaimer">AI-generated summary based on price data above — not financial advice.</p>
+      </div>`;
+  } else {
+    const fallback = typeof noteData === 'string' ? noteData : JSON.stringify(noteData);
+    aiHtml = `<div class="note-panel"><h3>Research note</h3><p class="note">${fallback}</p><p class="disclaimer">AI-generated — not financial advice.</p></div>`;
+  }
 
   results.innerHTML = `
     <div class="ticker-header">
@@ -407,38 +551,31 @@ function renderSingle(stockData, note, earningsNote) {
         <span><i class="dot dot-sma50"></i>SMA ${cfg.sma2Period}</span>
       </div>
     </div>
+    <div class="macd-panel">
+      <canvas id="macd-chart" class="macd-canvas"></canvas>
+      <div class="rsi-legend">MACD(12,26,9) · <span style="color:#4e9af1">MACD line</span> · <span style="color:#f4b942">signal line</span> · histogram</div>
+    </div>
     <div class="rsi-panel">
       <canvas id="rsi-chart" class="rsi-canvas"></canvas>
       <div class="rsi-legend">RSI(${cfg.rsiPeriod}) · <span class="rsi-oversold">oversold &lt;30</span> · <span class="rsi-overbought">overbought &gt;70</span></div>
     </div>
-    <div class="note-panel">
-      <h3>Price action note</h3>
-      <p class="note">${note}</p>
-      <p class="disclaimer">AI-generated summary based on price data above — not financial advice.</p>
-    </div>
+    ${aiHtml}
     ${stockData.earningsData ? renderEarningsPanel(stockData.earningsData, earningsNote) : ''}
   `;
 
   drawPriceChart(document.getElementById('price-chart'), priceData, sma20, sma50);
+  drawMACDChart(document.getElementById('macd-chart'), macd, priceData);
   drawRSIChart(document.getElementById('rsi-chart'), rsi14);
 }
 
 // ─── Comparison rendering ─────────────────────────────────────────────────────
 
-function renderComparison(stockDataArr, note) {
-  const tickers = stockDataArr.map((s) => s.ticker);
+function renderComparison(stockDataArr, note, optResult) {
+  const tickers = stockDataArr.map(s => s.ticker);
 
-  // Table
   const thead = `<tr>
-    <th>Ticker</th>
-    <th>Price</th>
-    <th>Return</th>
-    <th>Ann. Return</th>
-    <th>Volatility</th>
-    <th>Sharpe</th>
-    <th>Max DD</th>
-    <th>Beta</th>
-    <th>RSI</th>
+    <th>Ticker</th><th>Price</th><th>Return</th><th>Ann. Return</th>
+    <th>Volatility</th><th>Sharpe</th><th>Max DD</th><th>Beta</th><th>RSI</th>
   </tr>`;
 
   const tbody = stockDataArr.map(({ ticker, metrics: m }, idx) => {
@@ -458,42 +595,62 @@ function renderComparison(stockDataArr, note) {
     </tr>`;
   }).join('');
 
-  // Correlation matrix (clean returns, aligned length)
-  const returnArrays = stockDataArr.map((s) => s.returns.filter((r) => r !== null));
-  const minLen = Math.min(...returnArrays.map((r) => r.length));
-  const aligned = returnArrays.map((r) => r.slice(r.length - minLen));
+  // Static correlation matrix
+  const returnArrays = stockDataArr.map(s => s.returns.filter(r => r !== null));
+  const minLen = Math.min(...returnArrays.map(r => r.length));
+  const aligned = returnArrays.map(r => r.slice(r.length - minLen));
 
-  let corrHtml = '';
-  if (stockDataArr.length >= 2) {
-    const corrHeader = `<tr><th></th>${tickers.map((t) => `<th>${t}</th>`).join('')}</tr>`;
-    const corrRows = tickers.map((rowTicker, i) => {
-      const cells = tickers.map((_, j) => {
-        const corr = pearsonCorrelation(aligned[i], aligned[j]);
-        const val = corr != null ? corr.toFixed(2) : '—';
-        let bg = '';
-        if (corr != null) {
-          if (i === j) bg = `style="background:rgba(217,89,38,0.3)"`;
-          else if (corr > 0.7) bg = `style="background:rgba(217,89,38,0.2);color:var(--error)"`;
-          else if (corr > 0.4) bg = `style="background:rgba(244,185,66,0.15);color:#f4b942"`;
-          else bg = `style="background:rgba(12,163,12,0.1);color:var(--positive)"`;
-        }
-        return `<td ${bg}>${val}</td>`;
-      }).join('');
-      return `<tr><th>${rowTicker}</th>${cells}</tr>`;
+  const corrHeader = `<tr><th></th>${tickers.map(t => `<th>${t}</th>`).join('')}</tr>`;
+  const corrRows = tickers.map((rowTicker, i) => {
+    const cells = tickers.map((_, j) => {
+      const corr = pearsonCorrelation(aligned[i], aligned[j]);
+      const val = corr != null ? corr.toFixed(2) : '—';
+      let bg = '';
+      if (corr != null) {
+        if (i === j) bg = `style="background:rgba(217,89,38,0.3)"`;
+        else if (corr > 0.7) bg = `style="background:rgba(217,89,38,0.2);color:var(--error)"`;
+        else if (corr > 0.4) bg = `style="background:rgba(244,185,66,0.15);color:#f4b942"`;
+        else bg = `style="background:rgba(12,163,12,0.1);color:var(--positive)"`;
+      }
+      return `<td ${bg}>${val}</td>`;
     }).join('');
-    corrHtml = `
-      <div class="corr-panel">
-        <h4 class="section-title">Return Correlation</h4>
-        <div class="table-wrap">
-          <table class="corr-table">
-            <thead>${corrHeader}</thead>
-            <tbody>${corrRows}</tbody>
-          </table>
+    return `<tr><th>${rowTicker}</th>${cells}</tr>`;
+  }).join('');
+
+  // Portfolio optimization HTML
+  let optHtml = '';
+  if (optResult) {
+    const methodLabel = optResult.method === 'minVariance' ? 'Minimum-Variance' : 'Maximum Sharpe Ratio';
+    const weightRows = stockDataArr.map((s, i) =>
+      `<tr>
+        <td><span class="ticker-dot" style="background:${TICKER_COLORS[i]}"></span>${s.ticker}</td>
+        <td class="positive">${(optResult.weights[i] * 100).toFixed(1)}%</td>
+      </tr>`
+    ).join('');
+    optHtml = `
+      <div class="opt-panel">
+        <h4 class="section-title">${methodLabel} Portfolio (Monte Carlo · 5 000 simulations)</h4>
+        <div class="opt-layout">
+          <div>
+            <div class="table-wrap" style="margin-bottom:0.75rem">
+              <table class="comparison-table">
+                <thead><tr><th>Ticker</th><th>Weight</th></tr></thead>
+                <tbody>${weightRows}</tbody>
+              </table>
+            </div>
+            <div class="opt-stats">
+              <span>Ann. return <strong class="${signClass(optResult.annualizedReturn)}">${fmtPct(optResult.annualizedReturn)}</strong></span>
+              <span>Volatility <strong>${fmtPct(optResult.annualizedVol)}</strong></span>
+              <span>Sharpe <strong class="${optResult.sharpe != null && optResult.sharpe > 1 ? 'positive' : 'muted'}">${fmtNum(optResult.sharpe)}</strong></span>
+            </div>
+          </div>
+          <div class="weights-chart-wrap">
+            <canvas id="weights-chart" class="weights-canvas"></canvas>
+          </div>
         </div>
       </div>`;
   }
 
-  // Legend
   const legendItems = stockDataArr.map(({ ticker }, idx) =>
     `<span><i class="dot" style="background:${TICKER_COLORS[idx]};display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:0.35rem;vertical-align:middle"></i>${ticker}</span>`
   ).join('');
@@ -502,17 +659,24 @@ function renderComparison(stockDataArr, note) {
     <h2 class="comparison-title">${tickers.join(' · ')}</h2>
     <p class="date-range" style="margin:-0.5rem 0 1rem">${stockDataArr[0].priceData[0].date} – ${stockDataArr[0].priceData.at(-1).date} · ${cfg.outputsize} ${cfg.interval === '1week' ? 'weeks' : 'days'} · ${cfg.interval === '1week' ? 'weekly' : 'daily'} · beta vs ${cfg.benchmark}</p>
     <div class="table-wrap">
-      <table class="comparison-table">
-        <thead>${thead}</thead>
-        <tbody>${tbody}</tbody>
-      </table>
+      <table class="comparison-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>
     </div>
     <div class="chart-panel">
       <p class="chart-label">Normalized performance (100 = period start)</p>
       <canvas id="comparison-chart" class="chart-canvas"></canvas>
       <div class="legend">${legendItems}</div>
     </div>
-    ${corrHtml}
+    <div class="corr-panel">
+      <h4 class="section-title">Return Correlation (full period)</h4>
+      <div class="table-wrap">
+        <table class="corr-table"><thead>${corrHeader}</thead><tbody>${corrRows}</tbody></table>
+      </div>
+    </div>
+    <div class="rolling-corr-panel">
+      <h4 class="section-title">Rolling 30-Day Return Correlation</h4>
+      <canvas id="rolling-corr-chart" class="chart-canvas"></canvas>
+    </div>
+    ${optHtml}
     <div class="note-panel">
       <h3>Comparative analysis</h3>
       <p class="note">${note}</p>
@@ -521,6 +685,8 @@ function renderComparison(stockDataArr, note) {
   `;
 
   drawComparisonChart(document.getElementById('comparison-chart'), stockDataArr);
+  drawRollingCorrelChart(document.getElementById('rolling-corr-chart'), stockDataArr);
+  if (optResult) drawWeightsChart(document.getElementById('weights-chart'), tickers, optResult.weights);
 }
 
 // ─── Earnings panel ───────────────────────────────────────────────────────────
@@ -531,8 +697,8 @@ function renderEarningsPanel(earningsData, earningsNote) {
   const total = sentiment.overall.positive_count + sentiment.overall.negative_count;
   const posWidth = total > 0 ? Math.round((sentiment.overall.positive_count / total) * 100) : 50;
   const labelClass = sentiment.overall.label === 'positive' ? 'positive' : sentiment.overall.label === 'negative' ? 'negative' : '';
-  const companyDensity = sentiment.by_role.find((r) => r.role_group === 'Company')?.sentiment_density ?? 0;
-  const analystDensity = sentiment.by_role.find((r) => r.role_group === 'Analyst')?.sentiment_density ?? 0;
+  const companyDensity = sentiment.by_role.find(r => r.role_group === 'Company')?.sentiment_density ?? 0;
+  const analystDensity = sentiment.by_role.find(r => r.role_group === 'Analyst')?.sentiment_density ?? 0;
   const densityRatio = analystDensity !== 0 ? (companyDensity / Math.abs(analystDensity)).toFixed(0) : '—';
 
   const sentimentHtml = `
@@ -550,7 +716,7 @@ function renderEarningsPanel(earningsData, earningsNote) {
       </div>
     </div>`;
 
-  const figureCards = key_figures.map((f) => `
+  const figureCards = key_figures.map(f => `
     <div class="metric-card">
       <span class="metric-label">${f.metric}</span>
       <span class="metric-value muted">${f.figure}</span>
@@ -563,7 +729,7 @@ function renderEarningsPanel(earningsData, earningsNote) {
       <div class="metrics-grid">${figureCards}</div>
     </div>`;
 
-  const flsItems = forward_looking.map((f) => `
+  const flsItems = forward_looking.map(f => `
     <li class="fls-item">
       <span class="fls-speaker">${f.speaker}</span>
       <span class="fls-text">"${f.statement}"</span>
@@ -618,8 +784,8 @@ function drawPriceChart(canvas, priceData, sma20, sma50) {
   const cw = width - pad.left - pad.right;
   const ch = height - pad.top - pad.bottom;
 
-  const closes = priceData.map((b) => b.close);
-  const allV = [...closes, ...sma20, ...sma50].filter((v) => v != null);
+  const closes = priceData.map(b => b.close);
+  const allV = [...closes, ...sma20, ...sma50].filter(v => v != null);
   const minV = Math.min(...allV);
   const maxV = Math.max(...allV);
   const vpad = (maxV - minV) * 0.08 || 1;
@@ -628,15 +794,15 @@ function drawPriceChart(canvas, priceData, sma20, sma50) {
 
   const n = priceData.length;
   const xStep = n > 1 ? cw / (n - 1) : 0;
-  const xAt = (i) => pad.left + i * xStep;
-  const yAt = (v) => pad.top + ch * (1 - (v - yMin) / (yMax - yMin));
+  const xAt = i => pad.left + i * xStep;
+  const yAt = v => pad.top + ch * (1 - (v - yMin) / (yMax - yMin));
 
   ctx.strokeStyle = '#2c2c2a';
   ctx.fillStyle = '#898781';
   ctx.font = '11px Menlo, "Courier New", monospace';
   ctx.lineWidth = 1;
-  for (let s = 0; s <= 4; s++) {
-    const v = yMin + (yMax - yMin) * (s / 4);
+  for (let step = 0; step <= 4; step++) {
+    const v = yMin + (yMax - yMin) * (step / 4);
     const y = yAt(v);
     ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
     ctx.fillText(`$${v.toFixed(2)}`, 4, y + 4);
@@ -663,6 +829,75 @@ function drawPriceChart(canvas, priceData, sma20, sma50) {
   drawLine(sma50, '#e66767', 1.5);
 }
 
+function drawMACDChart(canvas, macdData, priceData) {
+  const s = setupCanvas(canvas);
+  if (!s) return;
+  const { ctx, width, height } = s;
+  ctx.clearRect(0, 0, width, height);
+
+  const { macdLine, signalLine, histogram } = macdData;
+  const pad = { top: 12, right: 12, bottom: 26, left: 52 };
+  const cw = width - pad.left - pad.right;
+  const ch = height - pad.top - pad.bottom;
+
+  const allV = [...macdLine, ...signalLine, ...histogram].filter(v => v != null);
+  if (!allV.length) return;
+  const absMax = Math.max(Math.abs(Math.min(...allV)), Math.abs(Math.max(...allV)));
+  const vpad = absMax * 0.15 || 0.01;
+  const yMin = -(absMax + vpad);
+  const yMax = absMax + vpad;
+
+  const n = macdLine.length;
+  const xStep = n > 1 ? cw / (n - 1) : 0;
+  const xAt = i => pad.left + i * xStep;
+  const yAt = v => pad.top + ch * (1 - (v - yMin) / (yMax - yMin));
+  const y0 = yAt(0);
+
+  ctx.strokeStyle = '#2c2c2a';
+  ctx.fillStyle = '#898781';
+  ctx.font = '10px Menlo, "Courier New", monospace';
+  ctx.lineWidth = 1;
+  [-1, -0.5, 0, 0.5, 1].forEach(frac => {
+    const v = frac * absMax;
+    const y = yAt(v);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
+    ctx.fillText(v.toFixed(2), 4, y + 3);
+  });
+
+  const xTicks = Math.min(6, n - 1);
+  for (let t = 0; t <= xTicks; t++) {
+    const i = Math.round((n - 1) * (t / xTicks));
+    if (priceData[i]) ctx.fillText(priceData[i].date.slice(5), Math.max(pad.left, xAt(i) - 18), height - 6);
+  }
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(pad.left, y0); ctx.lineTo(width - pad.right, y0); ctx.stroke();
+  ctx.setLineDash([]);
+
+  const barW = Math.max(1, xStep * 0.6);
+  histogram.forEach((v, i) => {
+    if (v == null) return;
+    const x = xAt(i) - barW / 2;
+    const barTop = v >= 0 ? yAt(v) : y0;
+    const barH = Math.abs(yAt(v) - y0);
+    ctx.fillStyle = v >= 0 ? 'rgba(12,163,12,0.5)' : 'rgba(230,103,103,0.5)';
+    ctx.fillRect(x, barTop, barW, barH);
+  });
+
+  function drawLine(values, color, lw) {
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = lw;
+    let started = false;
+    values.forEach((v, i) => {
+      if (v == null) return;
+      if (!started) { ctx.moveTo(xAt(i), yAt(v)); started = true; } else { ctx.lineTo(xAt(i), yAt(v)); }
+    });
+    ctx.stroke();
+  }
+  drawLine(macdLine, '#4e9af1', 1.5);
+  drawLine(signalLine, '#f4b942', 1.5);
+}
+
 function drawRSIChart(canvas, rsi14) {
   const s = setupCanvas(canvas);
   if (!s) return;
@@ -673,45 +908,38 @@ function drawRSIChart(canvas, rsi14) {
   const cw = width - pad.left - pad.right;
   const ch = height - pad.top - pad.bottom;
 
-  const yAt = (v) => pad.top + ch * (1 - v / 100);
-  const validIdx = rsi14.map((v, i) => v != null ? i : -1).filter((i) => i >= 0);
+  const yAt = v => pad.top + ch * (1 - v / 100);
+  const validIdx = rsi14.map((v, i) => v != null ? i : -1).filter(i => i >= 0);
   if (!validIdx.length) return;
 
   const n = rsi14.length;
   const xStep = n > 1 ? cw / (n - 1) : 0;
-  const xAt = (i) => pad.left + i * xStep;
+  const xAt = i => pad.left + i * xStep;
 
-  // Zones
   ctx.fillStyle = 'rgba(230,103,103,0.08)';
   ctx.fillRect(pad.left, yAt(100), cw, yAt(70) - yAt(100));
   ctx.fillStyle = 'rgba(12,163,12,0.08)';
   ctx.fillRect(pad.left, yAt(30), cw, yAt(0) - yAt(30));
 
-  // Reference lines
   ctx.strokeStyle = '#2c2c2a';
   ctx.lineWidth = 1;
   ctx.setLineDash([4, 4]);
-  [30, 70].forEach((level) => {
+  [30, 70].forEach(level => {
     const y = yAt(level);
     ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
   });
   ctx.setLineDash([]);
 
-  // Y labels
   ctx.fillStyle = '#898781';
   ctx.font = '10px Menlo, "Courier New", monospace';
-  [0, 30, 70, 100].forEach((level) => {
-    ctx.fillText(String(level), 4, yAt(level) + 4);
-  });
+  [0, 30, 70, 100].forEach(level => { ctx.fillText(String(level), 4, yAt(level) + 4); });
 
-  // X date labels
   const xTicks = Math.min(4, validIdx.length - 1);
   for (let t = 0; t <= xTicks; t++) {
     const idx = validIdx[Math.round((validIdx.length - 1) * (t / xTicks))];
     ctx.fillText(rsi14[idx] != null ? String(idx) : '', Math.max(pad.left, xAt(idx) - 12), height - 4);
   }
 
-  // RSI line
   ctx.beginPath();
   ctx.strokeStyle = '#4e9af1';
   ctx.lineWidth = 1.5;
@@ -722,8 +950,7 @@ function drawRSIChart(canvas, rsi14) {
   });
   ctx.stroke();
 
-  // Current RSI value label
-  const lastRsi = rsi14[rsi14.length - 1] ?? [...rsi14].reverse().find((v) => v != null);
+  const lastRsi = rsi14[rsi14.length - 1] ?? [...rsi14].reverse().find(v => v != null);
   if (lastRsi != null) {
     ctx.fillStyle = '#4e9af1';
     ctx.font = 'bold 11px Menlo, "Courier New", monospace';
@@ -741,9 +968,8 @@ function drawComparisonChart(canvas, stockDataArr) {
   const cw = width - pad.left - pad.right;
   const ch = height - pad.top - pad.bottom;
 
-  // Normalize: each series starts at 100
   const series = stockDataArr.map(({ priceData }) =>
-    priceData.map((b) => (b.close / priceData[0].close) * 100)
+    priceData.map(b => (b.close / priceData[0].close) * 100)
   );
 
   const allV = series.flat();
@@ -753,12 +979,11 @@ function drawComparisonChart(canvas, stockDataArr) {
   const yMin = minV - vpad;
   const yMax = maxV + vpad;
 
-  const n = Math.max(...stockDataArr.map((s) => s.priceData.length));
+  const n = Math.max(...stockDataArr.map(s => s.priceData.length));
   const xStep = n > 1 ? cw / (n - 1) : 0;
-  const xAt = (i) => pad.left + i * xStep;
-  const yAt = (v) => pad.top + ch * (1 - (v - yMin) / (yMax - yMin));
+  const xAt = i => pad.left + i * xStep;
+  const yAt = v => pad.top + ch * (1 - (v - yMin) / (yMax - yMin));
 
-  // Grid lines and labels
   ctx.strokeStyle = '#2c2c2a';
   ctx.fillStyle = '#898781';
   ctx.font = '11px Menlo, "Courier New", monospace';
@@ -770,7 +995,6 @@ function drawComparisonChart(canvas, stockDataArr) {
     ctx.fillText(v.toFixed(0), 4, y + 4);
   }
 
-  // 100 baseline
   if (yMin < 100 && yMax > 100) {
     ctx.strokeStyle = 'rgba(255,255,255,0.15)';
     ctx.setLineDash([4, 4]);
@@ -778,7 +1002,6 @@ function drawComparisonChart(canvas, stockDataArr) {
     ctx.setLineDash([]);
   }
 
-  // Date labels from first series
   const ref = stockDataArr[0].priceData;
   const xTicks = Math.min(6, ref.length - 1);
   ctx.fillStyle = '#898781';
@@ -787,20 +1010,121 @@ function drawComparisonChart(canvas, stockDataArr) {
     ctx.fillText(ref[i].date.slice(5), Math.max(pad.left, xAt(i) - 18), height - 6);
   }
 
-  // Series lines + end labels
   series.forEach((vals, idx) => {
     const color = TICKER_COLORS[idx];
-    ctx.beginPath();
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2;
     vals.forEach((v, i) => {
       if (i === 0) ctx.moveTo(xAt(i), yAt(v)); else ctx.lineTo(xAt(i), yAt(v));
     });
     ctx.stroke();
-
     const lastVal = vals[vals.length - 1];
     ctx.fillStyle = color;
     ctx.font = 'bold 11px Menlo, "Courier New", monospace';
     ctx.fillText(stockDataArr[idx].ticker, width - pad.right + 6, yAt(lastVal) + 4);
   });
+}
+
+function drawRollingCorrelChart(canvas, stockDataArr) {
+  const s = setupCanvas(canvas);
+  if (!s) return;
+  const { ctx, width, height } = s;
+  ctx.clearRect(0, 0, width, height);
+
+  const returnArrays = stockDataArr.map(sd => sd.returns.filter(r => r !== null));
+  const minLen = Math.min(...returnArrays.map(r => r.length));
+  const aligned = returnArrays.map(r => r.slice(r.length - minLen));
+
+  const windowDays = 30;
+  const pairs = [];
+  for (let i = 0; i < stockDataArr.length; i++) {
+    for (let j = i + 1; j < stockDataArr.length; j++) {
+      pairs.push({
+        label: `${stockDataArr[i].ticker}–${stockDataArr[j].ticker}`,
+        data: rollingCorrelation(aligned[i], aligned[j], windowDays),
+        color: TICKER_COLORS[pairs.length % TICKER_COLORS.length],
+      });
+    }
+  }
+  if (!pairs.length) return;
+
+  const pad = { top: 12, right: 100, bottom: 26, left: 40 };
+  const cw = width - pad.left - pad.right;
+  const ch = height - pad.top - pad.bottom;
+  const n = minLen;
+  const xStep = n > 1 ? cw / (n - 1) : 0;
+  const xAt = i => pad.left + i * xStep;
+  const yAt = v => pad.top + ch * (1 - (v + 1) / 2);
+
+  ctx.strokeStyle = '#2c2c2a';
+  ctx.fillStyle = '#898781';
+  ctx.font = '10px Menlo, "Courier New", monospace';
+  ctx.lineWidth = 1;
+  [-1, -0.5, 0, 0.5, 1].forEach(v => {
+    const y = yAt(v);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
+    ctx.fillText(v.toFixed(1), 4, y + 3);
+  });
+
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
+  ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(pad.left, yAt(0)); ctx.lineTo(width - pad.right, yAt(0)); ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Date labels from last minLen bars of first stock
+  const refPriceData = stockDataArr[0].priceData;
+  const refDates = refPriceData.slice(refPriceData.length - minLen);
+  ctx.fillStyle = '#898781';
+  const xTicks = Math.min(6, n - 1);
+  for (let t = 0; t <= xTicks; t++) {
+    const i = Math.round((n - 1) * (t / xTicks));
+    const d = refDates[i]?.date?.slice(5) ?? '';
+    ctx.fillText(d, Math.max(pad.left, xAt(i) - 18), height - 6);
+  }
+
+  pairs.forEach(({ label, data, color }, idx) => {
+    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 1.5;
+    let started = false;
+    data.forEach((v, i) => {
+      if (v == null) return;
+      if (!started) { ctx.moveTo(xAt(i), yAt(v)); started = true; } else { ctx.lineTo(xAt(i), yAt(v)); }
+    });
+    ctx.stroke();
+
+    const lastVal = [...data].reverse().find(v => v != null);
+    if (lastVal != null) {
+      ctx.fillStyle = color;
+      ctx.font = '10px Menlo, "Courier New", monospace';
+      ctx.fillText(label, width - pad.right + 4, yAt(lastVal) + 4 + idx * 14);
+    }
+  });
+}
+
+function drawWeightsChart(canvas, tickers, weights) {
+  const s = setupCanvas(canvas);
+  if (!s) return;
+  const { ctx, width, height } = s;
+  ctx.clearRect(0, 0, width, height);
+
+  const n = tickers.length;
+  const pad = { top: 28, right: 8, bottom: 28, left: 8 };
+  const cw = width - pad.left - pad.right;
+  const ch = height - pad.top - pad.bottom;
+  const slotW = cw / n;
+  const barW = slotW * 0.65;
+
+  ctx.font = '11px Menlo, "Courier New", monospace';
+  ctx.textAlign = 'center';
+
+  weights.forEach((w, i) => {
+    const x = pad.left + i * slotW + (slotW - barW) / 2;
+    const barH = ch * w;
+    const y = pad.top + ch - barH;
+    ctx.fillStyle = TICKER_COLORS[i];
+    ctx.fillRect(x, y, barW, barH);
+    ctx.fillText((w * 100).toFixed(1) + '%', x + barW / 2, y - 6);
+    ctx.fillStyle = '#898781';
+    ctx.fillText(tickers[i], x + barW / 2, height - 8);
+  });
+
+  ctx.textAlign = 'left';
 }
