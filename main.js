@@ -5,6 +5,9 @@ const TICKER_COLORS = ['#f2f2f0', '#4e9af1', '#76c442', '#f4b942', '#e668a7'];
 const EARNINGS_TICKERS = new Set(['AAPL']);
 let lastRenderData = null;
 
+// Shared settings, updated on each submit so render helpers can reference them
+let cfg = { outputsize: 130, interval: '1day', benchmark: 'SPY', rsiPeriod: 14, sma1Period: 20, sma2Period: 50 };
+
 const form = document.getElementById('ticker-form');
 const results = document.getElementById('results');
 
@@ -21,17 +24,25 @@ form.addEventListener('submit', async (event) => {
   const twelveDataKey = document.getElementById('twelvedata-key').value.trim();
   const openRouterKey = document.getElementById('openrouter-key').value.trim();
 
-  const needSpy = true;
-  const spyTicker = 'SPY';
+  cfg = {
+    outputsize: parseInt(document.getElementById('time-period').value, 10) || 130,
+    interval: document.getElementById('interval').value || '1day',
+    benchmark: document.getElementById('benchmark').value || 'SPY',
+    rsiPeriod: Math.max(2, parseInt(document.getElementById('rsi-period').value, 10) || 14),
+    sma1Period: Math.max(2, parseInt(document.getElementById('sma1').value, 10) || 20),
+    sma2Period: Math.max(2, parseInt(document.getElementById('sma2').value, 10) || 50),
+  };
+
+  const spyTicker = cfg.benchmark;
   const fetchTickers = tickers.includes(spyTicker)
     ? tickers
     : [...tickers, spyTicker];
 
-  results.innerHTML = `<p class="status-loading">Fetching price data for ${tickers.join(', ')}${needSpy ? ' + SPY (for beta)' : ''}…</p>`;
+  results.innerHTML = `<p class="status-loading">Fetching price data for ${tickers.join(', ')} + ${cfg.benchmark} (for beta)…</p>`;
 
   try {
     // Fetch price + earnings in parallel
-    const pricePromises = fetchTickers.map((t) => fetchPriceData(t, twelveDataKey));
+    const pricePromises = fetchTickers.map((t) => fetchPriceData(t, twelveDataKey, cfg.outputsize, cfg.interval));
     const earningsPromises = tickers.map((t) => fetchEarningsData(t));
 
     const [allPriceResults, allEarningsResults] = await Promise.all([
@@ -51,9 +62,9 @@ form.addEventListener('submit', async (event) => {
     const stockDataArr = tickers.map((ticker) => {
       const priceData = priceMap[ticker];
       const returns = calculateReturns(priceData);
-      const sma20 = calculateSMA(priceData, 20);
-      const sma50 = calculateSMA(priceData, 50);
-      const rsi14 = calculateRSI(priceData, 14);
+      const sma20 = calculateSMA(priceData, cfg.sma1Period);
+      const sma50 = calculateSMA(priceData, cfg.sma2Period);
+      const rsi14 = calculateRSI(priceData, cfg.rsiPeriod);
       const metrics = computeMetrics(priceData, returns, sma20, sma50, rsi14, spyReturns, rfRate);
       return { ticker, priceData, returns, sma20, sma50, rsi14, metrics, earningsData: earningsMap[ticker] };
     });
@@ -93,8 +104,8 @@ window.addEventListener('resize', () => {
 
 // ─── Data fetching ────────────────────────────────────────────────────────────
 
-async function fetchPriceData(ticker, apiKey) {
-  const url = `https://api.twelvedata.com/time_series?symbol=${ticker}&interval=1day&outputsize=130&apikey=${apiKey}`;
+async function fetchPriceData(ticker, apiKey, outputsize = 130, interval = '1day') {
+  const url = `https://api.twelvedata.com/time_series?symbol=${ticker}&interval=${interval}&outputsize=${outputsize}&apikey=${apiKey}`;
   const response = await fetch(url);
   const body = await response.text();
   let raw;
@@ -198,11 +209,12 @@ function computeMetrics(priceData, returns, sma20, sma50, rsi14, spyReturns, rfR
   const mean = n > 0 ? cleanReturns.reduce((a, b) => a + b, 0) / n : 0;
   const variance = n > 1 ? cleanReturns.reduce((s, r) => s + (r - mean) ** 2, 0) / (n - 1) : 0;
   const dailyVol = Math.sqrt(variance);
-  const annualizedReturn = mean * 252;
-  const annualizedVol = dailyVol * Math.sqrt(252);
+  const annFactor = cfg.interval === '1week' ? 52 : 252;
+  const annualizedReturn = mean * annFactor;
+  const annualizedVol = dailyVol * Math.sqrt(annFactor);
 
-  const rfDaily = rfRate / 252;
-  const excessReturns = cleanReturns.map((r) => r - rfDaily);
+  const rfPeriodic = rfRate / annFactor;
+  const excessReturns = cleanReturns.map((r) => r - rfPeriodic);
   const excessMean = excessReturns.reduce((a, b) => a + b, 0) / excessReturns.length;
   const sharpe = annualizedVol > 0 ? (excessMean * 252) / annualizedVol : null;
 
@@ -235,8 +247,8 @@ function computeMetrics(priceData, returns, sma20, sma50, rsi14, spyReturns, rfR
   const latestSma50 = [...sma50].reverse().find((v) => v != null) ?? null;
   let signal = 'Neutral';
   if (latestSma20 != null && latestSma50 != null) {
-    if (latestSma20 > latestSma50) signal = 'Bullish (SMA20 > SMA50)';
-    else if (latestSma20 < latestSma50) signal = 'Bearish (SMA20 < SMA50)';
+    if (latestSma20 > latestSma50) signal = `Bullish (SMA${cfg.sma1Period} > SMA${cfg.sma2Period})`;
+    else if (latestSma20 < latestSma50) signal = `Bearish (SMA${cfg.sma1Period} < SMA${cfg.sma2Period})`;
   }
 
   const rsiLatest = [...rsi14].reverse().find((v) => v != null) ?? null;
@@ -275,7 +287,8 @@ async function getResearchNote(stockData, apiKey) {
     `Annualized return: ${pct(m.annualizedReturn)}. Annualized volatility: ${pct(m.annualizedVol)}.\n` +
     `Sharpe ratio: ${m.sharpe != null ? m.sharpe.toFixed(2) : 'n/a'}. Max drawdown: ${pct(m.maxDrawdown)}. ` +
     `Beta vs SPY: ${m.beta != null ? m.beta.toFixed(2) : 'n/a'}.\n` +
-    `RSI(14): ${m.rsiLatest != null ? m.rsiLatest.toFixed(1) : 'n/a'}. SMA signal: ${m.signal}.\n\n` +
+    `RSI(${cfg.rsiPeriod}): ${m.rsiLatest != null ? m.rsiLatest.toFixed(1) : 'n/a'}. SMA signal: ${m.signal}.\n` +
+    `Beta vs ${cfg.benchmark}: ${m.beta != null ? m.beta.toFixed(2) : 'n/a'}. Interval: ${cfg.interval === '1week' ? 'weekly' : 'daily'}.\n\n` +
     `Write a concise one-paragraph research note covering price action, momentum, and risk profile.`;
   return callOpenRouter(apiKey, 'You are a concise financial research analyst. Be factual and specific.', prompt);
 }
@@ -289,7 +302,7 @@ async function getComparisonNote(stockDataArr, rfRate, apiKey) {
       `RSI ${m.rsiLatest != null ? m.rsiLatest.toFixed(0) : 'n/a'}, signal: ${m.signal}`;
   }).join('\n');
   const prompt =
-    `Comparison of ${stockDataArr.map((s) => s.ticker).join(', ')} — 130-day window. Risk-free rate: ${(rfRate * 100).toFixed(1)}%.\n\n${lines}\n\n` +
+    `Comparison of ${stockDataArr.map((s) => s.ticker).join(', ')} — ${cfg.outputsize}-${cfg.interval === '1week' ? 'week' : 'day'} window, ${cfg.interval === '1week' ? 'weekly' : 'daily'} data. Risk-free rate: ${(rfRate * 100).toFixed(1)}%.\n\n${lines}\n\n` +
     `Write three short paragraphs: ` +
     `(1) which stock had the best risk-adjusted return and why, ` +
     `(2) what momentum signals (RSI, SMA) suggest about each, ` +
@@ -365,18 +378,19 @@ function renderSingle(stockData, note, earningsNote) {
   const sharpeClass = m.sharpe == null ? 'muted' : m.sharpe > 1 ? 'positive' : m.sharpe < 0 ? 'negative' : 'muted';
   const signalClass = m.signal.startsWith('Bullish') ? 'positive' : m.signal.startsWith('Bearish') ? 'negative' : 'muted';
 
+  const periodUnit = cfg.interval === '1week' ? 'wk' : 'day';
   const cards = [
     metricCardHtml('Current price', `$${m.latest.close.toFixed(2)}`, `open $${m.first.close.toFixed(2)}`, 'muted'),
-    metricCardHtml('Period high', `$${m.periodHigh.toFixed(2)}`, `${priceData.length}-day high`, 'positive'),
-    metricCardHtml('Period low', `$${m.periodLow.toFixed(2)}`, `${priceData.length}-day low`, 'negative'),
-    metricCardHtml('Period return', fmtPct(m.periodReturn), `${priceData.length} days`, signClass(m.periodReturn)),
+    metricCardHtml('Period high', `$${m.periodHigh.toFixed(2)}`, `${priceData.length}-${periodUnit} high`, 'positive'),
+    metricCardHtml('Period low', `$${m.periodLow.toFixed(2)}`, `${priceData.length}-${periodUnit} low`, 'negative'),
+    metricCardHtml('Period return', fmtPct(m.periodReturn), `${priceData.length} ${periodUnit}s`, signClass(m.periodReturn)),
     metricCardHtml('Ann. return', fmtPct(m.annualizedReturn), 'annualized', signClass(m.annualizedReturn)),
     metricCardHtml('Volatility', fmtPct(m.annualizedVol), 'annualized', 'muted'),
     metricCardHtml('Sharpe ratio', fmtNum(m.sharpe), `rf ${(document.getElementById('rfrate').value || '4.5')}%`, sharpeClass),
     metricCardHtml('Max drawdown', fmtPct(m.maxDrawdown), 'peak to trough', 'negative'),
-    metricCardHtml('Beta', fmtNum(m.beta), 'vs SPY', 'muted'),
-    metricCardHtml('RSI (14)', m.rsiLatest != null ? m.rsiLatest.toFixed(1) : '—', rsiSub, rsiClass),
-    metricCardHtml('SMA signal', m.signal, `SMA20 ${m.latestSma20 != null ? '$' + m.latestSma20.toFixed(2) : '—'} · SMA50 ${m.latestSma50 != null ? '$' + m.latestSma50.toFixed(2) : '—'}`, signalClass)
+    metricCardHtml('Beta', fmtNum(m.beta), `vs ${cfg.benchmark}`, 'muted'),
+    metricCardHtml(`RSI (${cfg.rsiPeriod})`, m.rsiLatest != null ? m.rsiLatest.toFixed(1) : '—', rsiSub, rsiClass),
+    metricCardHtml('SMA signal', m.signal, `SMA${cfg.sma1Period} ${m.latestSma20 != null ? '$' + m.latestSma20.toFixed(2) : '—'} · SMA${cfg.sma2Period} ${m.latestSma50 != null ? '$' + m.latestSma50.toFixed(2) : '—'}`, signalClass)
   ].join('');
 
   results.innerHTML = `
@@ -389,13 +403,13 @@ function renderSingle(stockData, note, earningsNote) {
       <canvas id="price-chart" class="chart-canvas"></canvas>
       <div class="legend">
         <span><i class="dot dot-close"></i>Close</span>
-        <span><i class="dot dot-sma20"></i>SMA 20</span>
-        <span><i class="dot dot-sma50"></i>SMA 50</span>
+        <span><i class="dot dot-sma20"></i>SMA ${cfg.sma1Period}</span>
+        <span><i class="dot dot-sma50"></i>SMA ${cfg.sma2Period}</span>
       </div>
     </div>
     <div class="rsi-panel">
       <canvas id="rsi-chart" class="rsi-canvas"></canvas>
-      <div class="rsi-legend">RSI(14) · <span class="rsi-oversold">oversold &lt;30</span> · <span class="rsi-overbought">overbought &gt;70</span></div>
+      <div class="rsi-legend">RSI(${cfg.rsiPeriod}) · <span class="rsi-oversold">oversold &lt;30</span> · <span class="rsi-overbought">overbought &gt;70</span></div>
     </div>
     <div class="note-panel">
       <h3>Price action note</h3>
@@ -486,6 +500,7 @@ function renderComparison(stockDataArr, note) {
 
   results.innerHTML = `
     <h2 class="comparison-title">${tickers.join(' · ')}</h2>
+    <p class="date-range" style="margin:-0.5rem 0 1rem">${stockDataArr[0].priceData[0].date} – ${stockDataArr[0].priceData.at(-1).date} · ${cfg.outputsize} ${cfg.interval === '1week' ? 'weeks' : 'days'} · ${cfg.interval === '1week' ? 'weekly' : 'daily'} · beta vs ${cfg.benchmark}</p>
     <div class="table-wrap">
       <table class="comparison-table">
         <thead>${thead}</thead>

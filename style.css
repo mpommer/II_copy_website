@@ -152,6 +152,53 @@ button:hover { background: var(--accent); color: var(--ink); }
 
 .field-hint a { color: var(--accent); }
 
+/* ── Advanced settings collapsible ──────────────────────── */
+
+details.advanced-settings {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin: 0.25rem 0;
+}
+
+summary.advanced-toggle {
+  padding: 0.5rem 0.75rem;
+  font-family: 'Menlo', 'Courier New', monospace;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--faint);
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+summary.advanced-toggle::-webkit-details-marker { display: none; }
+summary.advanced-toggle::before { content: '▶  '; font-size: 0.6rem; }
+details[open] summary.advanced-toggle::before { content: '▼  '; }
+
+.advanced-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 0.6rem 1rem;
+  padding: 0.75rem;
+  border-top: 1px solid var(--line);
+}
+
+.adv-field { display: flex; flex-direction: column; gap: 0.3rem; }
+
+select {
+  padding: 0.45rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--page);
+  color: var(--ink);
+  font-size: 0.95rem;
+  font-family: inherit;
+  width: 100%;
+}
+
+select:focus, input:focus { outline: 1px solid var(--accent); }
+
 /* ── Status / alerts ─────────────────────────────────────── */
 
 .status-loading { color: var(--muted); font-style: italic; }

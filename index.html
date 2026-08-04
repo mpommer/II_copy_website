@@ -24,6 +24,50 @@
         <input id="rfrate" name="rfrate" type="number" value="4.5" min="0" max="20" step="0.1" />
         <p class="field-hint">Used for Sharpe ratio. Default 4.5%.</p>
 
+        <details class="advanced-settings">
+          <summary class="advanced-toggle">Advanced settings</summary>
+          <div class="advanced-grid">
+            <div class="adv-field">
+              <label for="time-period">Time period</label>
+              <select id="time-period" name="time-period">
+                <option value="22">1 Month</option>
+                <option value="65">3 Months</option>
+                <option value="130" selected>6 Months</option>
+                <option value="252">1 Year</option>
+                <option value="504">2 Years</option>
+              </select>
+            </div>
+            <div class="adv-field">
+              <label for="interval">Interval</label>
+              <select id="interval" name="interval">
+                <option value="1day" selected>Daily</option>
+                <option value="1week">Weekly</option>
+              </select>
+            </div>
+            <div class="adv-field">
+              <label for="benchmark">Beta benchmark</label>
+              <select id="benchmark" name="benchmark">
+                <option value="SPY" selected>SPY — S&amp;P 500</option>
+                <option value="QQQ">QQQ — NASDAQ 100</option>
+                <option value="IWM">IWM — Russell 2000</option>
+                <option value="DIA">DIA — Dow Jones</option>
+              </select>
+            </div>
+            <div class="adv-field">
+              <label for="rsi-period">RSI period</label>
+              <input id="rsi-period" name="rsi-period" type="number" value="14" min="2" max="50" step="1" />
+            </div>
+            <div class="adv-field">
+              <label for="sma1">Fast SMA</label>
+              <input id="sma1" name="sma1" type="number" value="20" min="2" max="200" step="1" />
+            </div>
+            <div class="adv-field">
+              <label for="sma2">Slow SMA</label>
+              <input id="sma2" name="sma2" type="number" value="50" min="2" max="200" step="1" />
+            </div>
+          </div>
+        </details>
+
         <label for="twelvedata-key">Twelve Data API key</label>
         <input id="twelvedata-key" name="twelvedata-key" type="password" placeholder="Twelve Data key" required />
         <p class="field-hint">Free plan covers all US stocks and ETFs (8 req/min, 800/day). <a href="https://twelvedata.com/pricing" target="_blank" rel="noopener">Get a free key</a>.</p>
