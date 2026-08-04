@@ -16,9 +16,67 @@
   <main class="app-main">
     <section class="panel">
       <form id="ticker-form">
-        <label for="tickers">Ticker(s)</label>
-        <input id="tickers" name="tickers" type="text" placeholder="e.g. AAPL  or  AAPL, MSFT, NVDA" required />
-        <p class="field-hint">Separate with commas for side-by-side comparison (up to 5 tickers).</p>
+        <label>Stocks <span id="ticker-count" class="ticker-count">0 selected</span></label>
+
+        <div class="ticker-picker" id="ticker-picker">
+          <div class="ticker-group">
+            <p class="ticker-group-label">Technology</p>
+            <div class="ticker-chips">
+              <label class="ticker-chip"><input type="checkbox" value="AAPL"><span class="chip-ticker">AAPL</span><span class="chip-name">Apple</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="MSFT"><span class="chip-ticker">MSFT</span><span class="chip-name">Microsoft</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="NVDA"><span class="chip-ticker">NVDA</span><span class="chip-name">NVIDIA</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="GOOGL"><span class="chip-ticker">GOOGL</span><span class="chip-name">Alphabet</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="META"><span class="chip-ticker">META</span><span class="chip-name">Meta</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="AMZN"><span class="chip-ticker">AMZN</span><span class="chip-name">Amazon</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="TSLA"><span class="chip-ticker">TSLA</span><span class="chip-name">Tesla</span></label>
+            </div>
+          </div>
+          <div class="ticker-group">
+            <p class="ticker-group-label">Financials</p>
+            <div class="ticker-chips">
+              <label class="ticker-chip"><input type="checkbox" value="JPM"><span class="chip-ticker">JPM</span><span class="chip-name">JPMorgan</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="GS"><span class="chip-ticker">GS</span><span class="chip-name">Goldman Sachs</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="V"><span class="chip-ticker">V</span><span class="chip-name">Visa</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="MA"><span class="chip-ticker">MA</span><span class="chip-name">Mastercard</span></label>
+            </div>
+          </div>
+          <div class="ticker-group">
+            <p class="ticker-group-label">Healthcare</p>
+            <div class="ticker-chips">
+              <label class="ticker-chip"><input type="checkbox" value="JNJ"><span class="chip-ticker">JNJ</span><span class="chip-name">J&amp;J</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="LLY"><span class="chip-ticker">LLY</span><span class="chip-name">Eli Lilly</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="UNH"><span class="chip-ticker">UNH</span><span class="chip-name">UnitedHealth</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="ABBV"><span class="chip-ticker">ABBV</span><span class="chip-name">AbbVie</span></label>
+            </div>
+          </div>
+          <div class="ticker-group">
+            <p class="ticker-group-label">Energy</p>
+            <div class="ticker-chips">
+              <label class="ticker-chip"><input type="checkbox" value="XOM"><span class="chip-ticker">XOM</span><span class="chip-name">ExxonMobil</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="CVX"><span class="chip-ticker">CVX</span><span class="chip-name">Chevron</span></label>
+            </div>
+          </div>
+          <div class="ticker-group">
+            <p class="ticker-group-label">Consumer</p>
+            <div class="ticker-chips">
+              <label class="ticker-chip"><input type="checkbox" value="KO"><span class="chip-ticker">KO</span><span class="chip-name">Coca-Cola</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="PEP"><span class="chip-ticker">PEP</span><span class="chip-name">PepsiCo</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="MCD"><span class="chip-ticker">MCD</span><span class="chip-name">McDonald's</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="WMT"><span class="chip-ticker">WMT</span><span class="chip-name">Walmart</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="NKE"><span class="chip-ticker">NKE</span><span class="chip-name">Nike</span></label>
+            </div>
+          </div>
+          <div class="ticker-group">
+            <p class="ticker-group-label">ETF / Index</p>
+            <div class="ticker-chips">
+              <label class="ticker-chip"><input type="checkbox" value="SPY"><span class="chip-ticker">SPY</span><span class="chip-name">S&amp;P 500</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="QQQ"><span class="chip-ticker">QQQ</span><span class="chip-name">NASDAQ 100</span></label>
+              <label class="ticker-chip"><input type="checkbox" value="GLD"><span class="chip-ticker">GLD</span><span class="chip-name">Gold</span></label>
+            </div>
+          </div>
+        </div>
+
+        <p class="field-hint">Pick <strong>3–5 stocks</strong> for portfolio comparison, or 1 for a single-stock deep dive.</p>
 
         <label for="rfrate">Risk-free rate (% annual)</label>
         <input id="rfrate" name="rfrate" type="number" value="4.5" min="0" max="20" step="0.1" />

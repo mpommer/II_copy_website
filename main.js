@@ -3,7 +3,22 @@
 
 const TICKER_COLORS = ['#f2f2f0', '#4e9af1', '#76c442', '#f4b942', '#e668a7'];
 const EARNINGS_TICKERS = new Set(['AAPL']);
+const MAX_TICKERS = 5;
 let lastRenderData = null;
+
+// Chip picker — update counter badge and lock unchosen chips once limit is reached
+document.getElementById('ticker-picker').addEventListener('change', () => {
+  const checked = document.querySelectorAll('#ticker-picker input:checked');
+  const n = checked.length;
+  const counter = document.getElementById('ticker-count');
+  if (counter) {
+    counter.textContent = `${n} / ${MAX_TICKERS} selected`;
+    counter.className = 'ticker-count' + (n >= 3 ? ' ticker-count-ok' : '');
+  }
+  document.querySelectorAll('#ticker-picker input[type="checkbox"]').forEach(cb => {
+    cb.disabled = !cb.checked && n >= MAX_TICKERS;
+  });
+});
 
 let cfg = {
   outputsize: 130, interval: '1day', benchmark: 'SPY',
@@ -16,9 +31,11 @@ const results = document.getElementById('results');
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
 
-  const raw = document.getElementById('tickers').value;
-  const tickers = raw.split(',').map(t => t.trim().toUpperCase()).filter(Boolean).slice(0, 5);
-  if (!tickers.length) return;
+  const tickers = Array.from(document.querySelectorAll('#ticker-picker input:checked')).map(cb => cb.value);
+  if (!tickers.length) {
+    results.innerHTML = `<div class="alert"><strong>No stocks selected.</strong> Choose at least one from the list above.</div>`;
+    return;
+  }
 
   const rfRateInput = parseFloat(document.getElementById('rfrate').value);
   const rfRate = isNaN(rfRateInput) ? 0.045 : rfRateInput / 100;
