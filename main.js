@@ -7,7 +7,7 @@ let lastRenderData = null;
 
 let cfg = {
   outputsize: 130, interval: '1day', benchmark: 'SPY',
-  rsiPeriod: 14, sma1Period: 20, sma2Period: 50, optMethod: 'maxSharpe',
+  rsiPeriod: 14, sma1Period: 20, sma2Period: 50,
 };
 
 const form = document.getElementById('ticker-form');
@@ -33,7 +33,6 @@ form.addEventListener('submit', async (event) => {
     rsiPeriod: Math.max(2, parseInt(document.getElementById('rsi-period').value, 10) || 14),
     sma1Period: Math.max(2, parseInt(document.getElementById('sma1').value, 10) || 20),
     sma2Period: Math.max(2, parseInt(document.getElementById('sma2').value, 10) || 50),
-    optMethod: document.getElementById('opt-method').value || 'maxSharpe',
   };
 
   const spyTicker = cfg.benchmark;
@@ -79,10 +78,13 @@ form.addEventListener('submit', async (event) => {
       lastRenderData = { mode: 'single', stockDataArr, noteData, earningsNote: earningsNote ?? null };
       renderSingle(sd, noteData, earningsNote ?? null);
     } else {
-      const optResult = optimizePortfolio(stockDataArr, rfRate, cfg.optMethod);
-      const note = await getComparisonNote(stockDataArr, rfRate, openRouterKey, optResult);
-      lastRenderData = { mode: 'comparison', stockDataArr, note, optResult };
-      renderComparison(stockDataArr, note, optResult);
+      const portfolioData = buildPortfolioData(stockDataArr, rfRate);
+      const [note, portfolioNote] = await Promise.all([
+        getComparisonNote(stockDataArr, rfRate, openRouterKey),
+        getPortfolioNote(stockDataArr, portfolioData, rfRate, openRouterKey),
+      ]);
+      lastRenderData = { mode: 'comparison', stockDataArr, note, portfolioData, portfolioNote };
+      renderComparison(stockDataArr, note, portfolioData, portfolioNote);
     }
   } catch (err) {
     results.innerHTML = `<div class="alert"><strong>Something went wrong.</strong> ${err.message}</div>`;
@@ -243,7 +245,6 @@ function computeMetrics(priceData, returns, sma20, sma50, rsi14, spyReturns, rfR
   const periodReturn = (latest.close - first.close) / first.close;
   const periodHigh = Math.max(...priceData.map(b => b.high));
   const periodLow = Math.min(...priceData.map(b => b.low));
-  const avgVolume = priceData.reduce((s, b) => s + b.volume, 0) / priceData.length;
 
   const cleanReturns = returns.filter(r => r !== null);
   const n = cleanReturns.length;
@@ -291,10 +292,11 @@ function computeMetrics(priceData, returns, sma20, sma50, rsi14, spyReturns, rfR
 
   const rsiLatest = [...rsi14].reverse().find(v => v != null) ?? null;
 
-  return { first, latest, periodReturn, periodHigh, periodLow, avgVolume, annualizedReturn, annualizedVol, sharpe, maxDrawdown: maxDD, beta, latestSma20, latestSma50, signal, rsiLatest };
+  return { first, latest, periodReturn, periodHigh, periodLow, annualizedReturn, annualizedVol, sharpe, maxDrawdown: maxDD, beta, latestSma20, latestSma50, signal, rsiLatest };
 }
 
-function optimizePortfolio(stockDataArr, rfRate, method = 'maxSharpe') {
+// Runs 5 000 Monte Carlo simulations, returning all samples + both optimal portfolios.
+function buildPortfolioData(stockDataArr, rfRate) {
   const n = stockDataArr.length;
   if (n < 2) return null;
 
@@ -320,27 +322,27 @@ function optimizePortfolio(stockDataArr, rfRate, method = 'maxSharpe') {
     const portVol = Math.sqrt(portVar * annFactor);
     const portReturn = means.reduce((s, m, i) => s + w[i] * m, 0) * annFactor;
     const sharpe = portVol > 0 ? (portReturn - rfRate) / portVol : -Infinity;
-    return { portVar, portVol, portReturn, sharpe };
+    return { portVol, portReturn, sharpe };
   };
 
-  let bestWeights = null;
-  let bestMetric = method === 'minVariance' ? Infinity : -Infinity;
+  const samples = [];
+  let maxSharpeW = null, maxSharpeVal = -Infinity;
+  let minVarW = null, minVarVal = Infinity;
 
   for (let iter = 0; iter < 5000; iter++) {
-    // Exponential random vars normalised = uniform Dirichlet sample
     const raw = Array.from({ length: n }, () => -Math.log(Math.random() + 1e-10));
     const sum = raw.reduce((a, b) => a + b, 0);
     const w = raw.map(v => v / sum);
-    const { portVar, sharpe } = portStats(w);
-    const metric = method === 'minVariance' ? portVar : sharpe;
-    if (method === 'minVariance' ? metric < bestMetric : metric > bestMetric) {
-      bestMetric = metric;
-      bestWeights = w;
-    }
+    const { portVol, portReturn, sharpe } = portStats(w);
+    samples.push({ vol: portVol, ret: portReturn, sharpe });
+    if (sharpe > maxSharpeVal) { maxSharpeVal = sharpe; maxSharpeW = w; }
+    if (portVol < minVarVal) { minVarVal = portVol; minVarW = w; }
   }
 
-  const { portVol, portReturn, sharpe } = portStats(bestWeights);
-  return { weights: bestWeights, annualizedReturn: portReturn, annualizedVol: portVol, sharpe, method };
+  const maxSharpe = { weights: maxSharpeW, ...portStats(maxSharpeW) };
+  const minVariance = { weights: minVarW, ...portStats(minVarW) };
+
+  return { samples, maxSharpe, minVariance };
 }
 
 // ─── LLM calls ────────────────────────────────────────────────────────────────
@@ -391,7 +393,35 @@ async function getResearchNote(stockData, apiKey) {
   }
 }
 
-async function getComparisonNote(stockDataArr, rfRate, apiKey, optResult) {
+async function getPortfolioNote(stockDataArr, portfolioData, rfRate, apiKey) {
+  if (!portfolioData) return '';
+  const { maxSharpe, minVariance } = portfolioData;
+  const pct = v => (v * 100).toFixed(1) + '%';
+
+  const stockLines = stockDataArr.map(({ ticker, metrics: m }) =>
+    `${ticker}: ann.return ${pct(m.annualizedReturn)}, vol ${pct(m.annualizedVol)}, ` +
+    `Sharpe ${m.sharpe != null ? m.sharpe.toFixed(2) : 'n/a'}, beta ${m.beta != null ? m.beta.toFixed(2) : 'n/a'}`
+  ).join('\n');
+
+  const maxSLine = stockDataArr.map((s, i) => `${s.ticker} ${pct(maxSharpe.weights[i])}`).join(', ');
+  const minVLine = stockDataArr.map((s, i) => `${s.ticker} ${pct(minVariance.weights[i])}`).join(', ');
+
+  const prompt =
+    `Portfolio of ${stockDataArr.map(s => s.ticker).join(', ')}. Risk-free rate: ${pct(rfRate / 100 * 100)}.\n\n` +
+    `Individual metrics:\n${stockLines}\n\n` +
+    `Max-Sharpe portfolio (vol ${pct(maxSharpe.portVol)}, return ${pct(maxSharpe.portReturn)}, Sharpe ${maxSharpe.sharpe.toFixed(2)}):\n${maxSLine}\n\n` +
+    `Min-Variance portfolio (vol ${pct(minVariance.portVol)}, return ${pct(minVariance.portReturn)}, Sharpe ${minVariance.sharpe.toFixed(2)}):\n${minVLine}\n\n` +
+    `Write two paragraphs: (1) explain why the max-Sharpe portfolio allocates weights as it does — name specific stocks and link weights to their individual return, risk, or low correlation with the others; ` +
+    `(2) explain the trade-off between the two portfolios and which type of investor each suits.`;
+
+  return callOpenRouter(
+    apiKey,
+    'You are a portfolio manager explaining optimization results to MBA students. Be specific, name stocks by ticker, and keep it educational.',
+    prompt
+  );
+}
+
+async function getComparisonNote(stockDataArr, rfRate, apiKey) {
   const lines = stockDataArr.map(({ ticker, metrics: m }) => {
     const pct = v => v != null ? `${(v * 100).toFixed(1)}%` : 'n/a';
     return `${ticker}: return ${pct(m.periodReturn)}, ann.return ${pct(m.annualizedReturn)}, ` +
@@ -400,25 +430,14 @@ async function getComparisonNote(stockDataArr, rfRate, apiKey, optResult) {
       `RSI ${m.rsiLatest != null ? m.rsiLatest.toFixed(0) : 'n/a'}, signal: ${m.signal}`;
   }).join('\n');
 
-  let optSection = '';
-  if (optResult) {
-    const wLine = stockDataArr.map((s, i) => `${s.ticker}: ${(optResult.weights[i] * 100).toFixed(1)}%`).join(', ');
-    const methodLabel = optResult.method === 'minVariance' ? 'Minimum-Variance' : 'Maximum Sharpe Ratio';
-    optSection = `\n\n${methodLabel} portfolio: ${wLine} — ` +
-      `ann. return ${(optResult.annualizedReturn * 100).toFixed(1)}%, ` +
-      `vol ${(optResult.annualizedVol * 100).toFixed(1)}%, ` +
-      `Sharpe ${optResult.sharpe != null ? optResult.sharpe.toFixed(2) : 'n/a'}`;
-  }
-
   const prompt =
     `Comparison of ${stockDataArr.map(s => s.ticker).join(', ')} — ` +
     `${cfg.outputsize} ${cfg.interval === '1week' ? 'weeks' : 'days'}, risk-free rate ${(rfRate * 100).toFixed(1)}%.\n\n` +
-    `${lines}${optSection}\n\n` +
+    `${lines}\n\n` +
     `Write three short paragraphs: ` +
     `(1) which stock had the best risk-adjusted return and why, ` +
     `(2) what RSI and SMA momentum signals suggest about each, ` +
-    `(3) key risk differences (volatility, drawdown, beta)` +
-    (optResult ? ` and what the ${optResult.method === 'minVariance' ? 'min-variance' : 'max-Sharpe'} portfolio weights reveal about diversification` : '') + '.';
+    `(3) key risk differences (volatility, drawdown, beta).`;
   return callOpenRouter(apiKey, 'You are a concise equity research analyst. Compare stocks objectively.', prompt);
 }
 
@@ -430,13 +449,13 @@ async function getEarningsNote(ticker, earningsData, apiKey) {
   const flsLines = forward_looking.slice(0, 6).map(f => `[${f.speaker}] "${f.statement}"`).join('\n');
   const prompt =
     `Earnings call: ${ticker} ${meta.quarter} (${meta.report_date})\n\n` +
-    `SENTIMENT: Overall ${sentiment.overall.label}. ${sentiment.overall.positive_count} positive phrases, ${sentiment.overall.negative_count} negative. ` +
+    `SENTIMENT: Overall ${sentiment.overall.label}. ${sentiment.overall.positive_count} positive, ${sentiment.overall.negative_count} negative. ` +
     `Management density: ${companyDensity.toFixed(3)}, Analyst density: ${analystDensity.toFixed(3)}.\n\n` +
     `KEY FIGURES:\n${figureLines}\n\n` +
-    `FORWARD-LOOKING STATEMENTS:\n${flsLines}\n\n` +
-    `Write three paragraphs: (1) what the reported numbers reveal about business momentum, ` +
+    `FORWARD-LOOKING:\n${flsLines}\n\n` +
+    `Write three paragraphs: (1) what numbers reveal about business momentum, ` +
     `(2) what the tone gap between management and analysts signals, ` +
-    `(3) the top risks and catalysts implied by the forward-looking statements. No investment advice.`;
+    `(3) top risks and catalysts from forward-looking statements. No investment advice.`;
   return callOpenRouter(apiKey, 'You are a concise equity research analyst writing for institutional clients.', prompt);
 }
 
@@ -483,7 +502,7 @@ function signClass(v) {
 
 function redrawTab(tabId) {
   if (!lastRenderData) return;
-  const { mode, stockDataArr, optResult } = lastRenderData;
+  const { mode, stockDataArr, portfolioData } = lastRenderData;
   if (mode === 'single') {
     if (tabId === 'charts') {
       const sd = stockDataArr[0];
@@ -501,9 +520,13 @@ function redrawTab(tabId) {
     } else if (tabId === 'correlation') {
       const rc = document.getElementById('rolling-corr-chart');
       if (rc) drawRollingCorrelChart(rc, stockDataArr);
-    } else if (tabId === 'portfolio' && optResult) {
-      const wc = document.getElementById('weights-chart');
-      if (wc) drawWeightsChart(wc, stockDataArr.map(s => s.ticker), optResult.weights);
+    } else if (tabId === 'portfolio' && portfolioData) {
+      const fc = document.getElementById('frontier-chart');
+      if (fc) drawEfficientFrontier(fc, portfolioData);
+      const w1 = document.getElementById('weights-maxsharpe');
+      const w2 = document.getElementById('weights-minvar');
+      if (w1) drawWeightsChart(w1, stockDataArr.map(s => s.ticker), portfolioData.maxSharpe.weights);
+      if (w2) drawWeightsChart(w2, stockDataArr.map(s => s.ticker), portfolioData.minVariance.weights);
     }
   }
 }
@@ -614,7 +637,7 @@ function renderSingle(stockData, noteData, earningsNote) {
 
 // ─── Comparison rendering ─────────────────────────────────────────────────────
 
-function renderComparison(stockDataArr, note, optResult) {
+function renderComparison(stockDataArr, note, portfolioData, portfolioNote) {
   const tickers = stockDataArr.map(s => s.ticker);
 
   const thead = `<tr>
@@ -639,7 +662,7 @@ function renderComparison(stockDataArr, note, optResult) {
     </tr>`;
   }).join('');
 
-  // Static correlation matrix
+  // Correlation matrix
   const returnArrays = stockDataArr.map(s => s.returns.filter(r => r !== null));
   const minLen = Math.min(...returnArrays.map(r => r.length));
   const aligned = returnArrays.map(r => r.slice(r.length - minLen));
@@ -661,38 +684,62 @@ function renderComparison(stockDataArr, note, optResult) {
     return `<tr><th>${rowTicker}</th>${cells}</tr>`;
   }).join('');
 
-  // Portfolio optimization HTML
-  let optHtml = '';
-  if (optResult) {
-    const methodLabel = optResult.method === 'minVariance' ? 'Minimum-Variance' : 'Maximum Sharpe Ratio';
-    const weightRows = stockDataArr.map((s, i) =>
-      `<tr>
-        <td><span class="ticker-dot" style="background:${TICKER_COLORS[i]}"></span>${s.ticker}</td>
-        <td class="positive">${(optResult.weights[i] * 100).toFixed(1)}%</td>
-      </tr>`
-    ).join('');
-    optHtml = `
-      <div class="opt-panel">
-        <h4 class="section-title">${methodLabel} Portfolio (Monte Carlo · 5 000 simulations)</h4>
-        <div class="opt-layout">
-          <div>
-            <div class="table-wrap" style="margin-bottom:0.75rem">
-              <table class="comparison-table">
-                <thead><tr><th>Ticker</th><th>Weight</th></tr></thead>
-                <tbody>${weightRows}</tbody>
-              </table>
+  // Portfolio Suggestion tab content
+  let portfolioTabContent = '';
+  if (portfolioData) {
+    const { maxSharpe, minVariance } = portfolioData;
+
+    const methodBlock = (label, subtitle, data, canvasId) => {
+      const rows = stockDataArr.map((s, i) => {
+        const w = data.weights[i];
+        const barPct = (w * 100).toFixed(1);
+        return `<tr>
+          <td><span class="ticker-dot" style="background:${TICKER_COLORS[i]}"></span>${s.ticker}</td>
+          <td>
+            <div class="weight-bar-wrap">
+              <div class="weight-bar-fill" style="width:${barPct}%;background:${TICKER_COLORS[i]}"></div>
             </div>
-            <div class="opt-stats">
-              <span>Ann. return <strong class="${signClass(optResult.annualizedReturn)}">${fmtPct(optResult.annualizedReturn)}</strong></span>
-              <span>Volatility <strong>${fmtPct(optResult.annualizedVol)}</strong></span>
-              <span>Sharpe <strong class="${optResult.sharpe != null && optResult.sharpe > 1 ? 'positive' : 'muted'}">${fmtNum(optResult.sharpe)}</strong></span>
-            </div>
+          </td>
+          <td class="weight-pct">${barPct}%</td>
+        </tr>`;
+      }).join('');
+      return `
+        <div class="portfolio-method">
+          <p class="portfolio-method-title">${label}</p>
+          <p class="portfolio-method-subtitle">${subtitle}</p>
+          <table class="weight-table">
+            <tbody>${rows}</tbody>
+          </table>
+          <div class="opt-stats">
+            <span>Ann. return <strong class="${signClass(data.portReturn)}">${fmtPct(data.portReturn)}</strong></span>
+            <span>Volatility <strong>${fmtPct(data.portVol)}</strong></span>
+            <span>Sharpe <strong class="${data.sharpe > 1 ? 'positive' : 'muted'}">${data.sharpe.toFixed(2)}</strong></span>
           </div>
-          <div class="weights-chart-wrap">
-            <canvas id="weights-chart" class="weights-canvas"></canvas>
-          </div>
+          <canvas id="${canvasId}" class="weights-canvas" style="margin-top:0.75rem"></canvas>
+        </div>`;
+    };
+
+    portfolioTabContent = `
+      <div class="portfolio-methods">
+        ${methodBlock('Max Sharpe Ratio', 'Best risk-adjusted return', maxSharpe, 'weights-maxsharpe')}
+        ${methodBlock('Minimum Variance', 'Lowest portfolio risk', minVariance, 'weights-minvar')}
+      </div>
+      <div class="frontier-panel">
+        <h4 class="section-title">Efficient Frontier — 5 000 simulated portfolios</h4>
+        <canvas id="frontier-chart" class="frontier-canvas"></canvas>
+        <div class="frontier-legend">
+          <span><span class="frontier-dot" style="background:#f4b942"></span>Max Sharpe</span>
+          <span><span class="frontier-dot" style="background:#4e9af1"></span>Min Variance</span>
+          <span style="color:var(--faint);font-size:0.72rem">Colour = Sharpe ratio &nbsp;·&nbsp; red → yellow → green</span>
         </div>
-      </div>`;
+      </div>
+      ${portfolioNote ? `
+      <div class="note-panel" style="margin-top:1.5rem">
+        <h3>Portfolio rationale</h3>
+        <p class="note">${portfolioNote}</p>
+        <p class="disclaimer">AI-generated for educational purposes — not financial advice. Optimisation uses historical data only.</p>
+      </div>` : ''}
+    `;
   }
 
   const legendItems = stockDataArr.map(({ ticker }, idx) =>
@@ -702,35 +749,54 @@ function renderComparison(stockDataArr, note, optResult) {
   results.innerHTML = `
     <h2 class="comparison-title">${tickers.join(' · ')}</h2>
     <p class="date-range" style="margin:-0.5rem 0 1rem">${stockDataArr[0].priceData[0].date} – ${stockDataArr[0].priceData.at(-1).date} · ${cfg.outputsize} ${cfg.interval === '1week' ? 'weeks' : 'days'} · ${cfg.interval === '1week' ? 'weekly' : 'daily'} · beta vs ${cfg.benchmark}</p>
-    <div class="table-wrap">
-      <table class="comparison-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>
-    </div>
-    <div class="chart-panel">
-      <p class="chart-label">Normalized performance (100 = period start)</p>
-      <canvas id="comparison-chart" class="chart-canvas"></canvas>
-      <div class="legend">${legendItems}</div>
-    </div>
-    <div class="corr-panel">
-      <h4 class="section-title">Return Correlation (full period)</h4>
+
+    <nav class="tab-nav">
+      <button class="tab-btn active" data-tab="performance">Performance</button>
+      <button class="tab-btn" data-tab="correlation">Correlation</button>
+      <button class="tab-btn" data-tab="portfolio">Portfolio Suggestion</button>
+      <button class="tab-btn" data-tab="research">AI Research</button>
+    </nav>
+
+    <div class="tab-panel active" id="tab-performance">
       <div class="table-wrap">
-        <table class="corr-table"><thead>${corrHeader}</thead><tbody>${corrRows}</tbody></table>
+        <table class="comparison-table"><thead>${thead}</thead><tbody>${tbody}</tbody></table>
+      </div>
+      <div class="chart-panel">
+        <p class="chart-label">Normalized performance (100 = period start)</p>
+        <canvas id="comparison-chart" class="chart-canvas"></canvas>
+        <div class="legend">${legendItems}</div>
       </div>
     </div>
-    <div class="rolling-corr-panel">
-      <h4 class="section-title">Rolling 30-Day Return Correlation</h4>
-      <canvas id="rolling-corr-chart" class="chart-canvas"></canvas>
+
+    <div class="tab-panel" id="tab-correlation">
+      <div class="corr-panel">
+        <h4 class="section-title">Return Correlation (full period)</h4>
+        <div class="table-wrap">
+          <table class="corr-table"><thead>${corrHeader}</thead><tbody>${corrRows}</tbody></table>
+        </div>
+      </div>
+      <div class="rolling-corr-panel">
+        <h4 class="section-title">Rolling 30-Day Return Correlation</h4>
+        <canvas id="rolling-corr-chart" class="chart-canvas"></canvas>
+      </div>
     </div>
-    ${optHtml}
-    <div class="note-panel">
-      <h3>Comparative analysis</h3>
-      <p class="note">${note}</p>
-      <p class="disclaimer">AI-generated comparison based on price data above — not financial advice.</p>
+
+    <div class="tab-panel" id="tab-portfolio">
+      ${portfolioTabContent}
+    </div>
+
+    <div class="tab-panel" id="tab-research">
+      <div class="note-panel">
+        <h3>Comparative analysis</h3>
+        <p class="note">${note}</p>
+        <p class="disclaimer">AI-generated comparison based on price data above — not financial advice.</p>
+      </div>
     </div>
   `;
 
+  setupTabs();
   drawComparisonChart(document.getElementById('comparison-chart'), stockDataArr);
-  drawRollingCorrelChart(document.getElementById('rolling-corr-chart'), stockDataArr);
-  if (optResult) drawWeightsChart(document.getElementById('weights-chart'), tickers, optResult.weights);
+  // Correlation, Portfolio tabs drawn lazily on first click via redrawTab
 }
 
 // ─── Earnings panel ───────────────────────────────────────────────────────────
@@ -767,29 +833,17 @@ function renderEarningsPanel(earningsData, earningsNote) {
       ${f.sub ? `<span class="metric-sub">${f.sub}</span>` : ''}
     </div>`).join('');
 
-  const figuresHtml = `
-    <div class="earnings-section">
-      <h4 class="earnings-section-title">Reported Figures</h4>
-      <div class="metrics-grid">${figureCards}</div>
-    </div>`;
-
   const flsItems = forward_looking.map(f => `
     <li class="fls-item">
       <span class="fls-speaker">${f.speaker}</span>
       <span class="fls-text">"${f.statement}"</span>
     </li>`).join('');
 
-  const flsHtml = `
-    <div class="earnings-section">
-      <h4 class="earnings-section-title">Management Guidance &amp; Outlook</h4>
-      <ul class="fls-list">${flsItems}</ul>
-    </div>`;
-
   const noteHtml = earningsNote ? `
     <div class="earnings-section">
       <h4 class="earnings-section-title">Earnings Analysis</h4>
       <p class="note">${earningsNote}</p>
-      <p class="disclaimer">AI analysis of pre-computed earnings call data (R pipeline · ${meta.quarter} · ${meta.report_date}) — not financial advice.</p>
+      <p class="disclaimer">AI analysis of pre-computed earnings call data (${meta.quarter} · ${meta.report_date}) — not financial advice.</p>
     </div>` : '';
 
   return `
@@ -799,8 +853,14 @@ function renderEarningsPanel(earningsData, earningsNote) {
         <span class="earnings-badge">${meta.quarter} · ${meta.report_date}</span>
       </div>
       ${sentimentHtml}
-      ${figuresHtml}
-      ${flsHtml}
+      <div class="earnings-section">
+        <h4 class="earnings-section-title">Reported Figures</h4>
+        <div class="metrics-grid">${figureCards}</div>
+      </div>
+      <div class="earnings-section">
+        <h4 class="earnings-section-title">Management Guidance &amp; Outlook</h4>
+        <ul class="fls-list">${flsItems}</ul>
+      </div>
       ${noteHtml}
     </div>`;
 }
@@ -830,28 +890,23 @@ function drawPriceChart(canvas, priceData, sma20, sma50) {
 
   const closes = priceData.map(b => b.close);
   const allV = [...closes, ...sma20, ...sma50].filter(v => v != null);
-  const minV = Math.min(...allV);
-  const maxV = Math.max(...allV);
+  const minV = Math.min(...allV), maxV = Math.max(...allV);
   const vpad = (maxV - minV) * 0.08 || 1;
-  const yMin = minV - vpad;
-  const yMax = maxV + vpad;
+  const yMin = minV - vpad, yMax = maxV + vpad;
 
   const n = priceData.length;
   const xStep = n > 1 ? cw / (n - 1) : 0;
   const xAt = i => pad.left + i * xStep;
   const yAt = v => pad.top + ch * (1 - (v - yMin) / (yMax - yMin));
 
-  ctx.strokeStyle = '#2c2c2a';
-  ctx.fillStyle = '#898781';
-  ctx.font = '11px Menlo, "Courier New", monospace';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#2c2c2a'; ctx.fillStyle = '#898781';
+  ctx.font = '11px Menlo, "Courier New", monospace'; ctx.lineWidth = 1;
   for (let step = 0; step <= 4; step++) {
     const v = yMin + (yMax - yMin) * (step / 4);
     const y = yAt(v);
     ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
     ctx.fillText(`$${v.toFixed(2)}`, 4, y + 4);
   }
-
   const xTicks = Math.min(6, n - 1);
   for (let t = 0; t <= xTicks; t++) {
     const i = Math.round((n - 1) * (t / xTicks));
@@ -867,7 +922,6 @@ function drawPriceChart(canvas, priceData, sma20, sma50) {
     });
     ctx.stroke();
   }
-
   drawLine(closes, '#f2f2f0', 2);
   drawLine(sma20, '#d95926', 1.5);
   drawLine(sma50, '#e66767', 1.5);
@@ -888,8 +942,7 @@ function drawMACDChart(canvas, macdData, priceData) {
   if (!allV.length) return;
   const absMax = Math.max(Math.abs(Math.min(...allV)), Math.abs(Math.max(...allV)));
   const vpad = absMax * 0.15 || 0.01;
-  const yMin = -(absMax + vpad);
-  const yMax = absMax + vpad;
+  const yMin = -(absMax + vpad), yMax = absMax + vpad;
 
   const n = macdLine.length;
   const xStep = n > 1 ? cw / (n - 1) : 0;
@@ -897,10 +950,8 @@ function drawMACDChart(canvas, macdData, priceData) {
   const yAt = v => pad.top + ch * (1 - (v - yMin) / (yMax - yMin));
   const y0 = yAt(0);
 
-  ctx.strokeStyle = '#2c2c2a';
-  ctx.fillStyle = '#898781';
-  ctx.font = '10px Menlo, "Courier New", monospace';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#2c2c2a'; ctx.fillStyle = '#898781';
+  ctx.font = '10px Menlo, "Courier New", monospace'; ctx.lineWidth = 1;
   [-1, -0.5, 0, 0.5, 1].forEach(frac => {
     const v = frac * absMax;
     const y = yAt(v);
@@ -914,8 +965,7 @@ function drawMACDChart(canvas, macdData, priceData) {
     if (priceData[i]) ctx.fillText(priceData[i].date.slice(5), Math.max(pad.left, xAt(i) - 18), height - 6);
   }
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.2)';
-  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.2)'; ctx.setLineDash([3, 3]);
   ctx.beginPath(); ctx.moveTo(pad.left, y0); ctx.lineTo(width - pad.right, y0); ctx.stroke();
   ctx.setLineDash([]);
 
@@ -924,9 +974,8 @@ function drawMACDChart(canvas, macdData, priceData) {
     if (v == null) return;
     const x = xAt(i) - barW / 2;
     const barTop = v >= 0 ? yAt(v) : y0;
-    const barH = Math.abs(yAt(v) - y0);
     ctx.fillStyle = v >= 0 ? 'rgba(12,163,12,0.5)' : 'rgba(230,103,103,0.5)';
-    ctx.fillRect(x, barTop, barW, barH);
+    ctx.fillRect(x, barTop, barW, Math.abs(yAt(v) - y0));
   });
 
   function drawLine(values, color, lw) {
@@ -951,7 +1000,6 @@ function drawRSIChart(canvas, rsi14) {
   const pad = { top: 8, right: 48, bottom: 20, left: 36 };
   const cw = width - pad.left - pad.right;
   const ch = height - pad.top - pad.bottom;
-
   const yAt = v => pad.top + ch * (1 - v / 100);
   const validIdx = rsi14.map((v, i) => v != null ? i : -1).filter(i => i >= 0);
   if (!validIdx.length) return;
@@ -965,17 +1013,14 @@ function drawRSIChart(canvas, rsi14) {
   ctx.fillStyle = 'rgba(12,163,12,0.08)';
   ctx.fillRect(pad.left, yAt(30), cw, yAt(0) - yAt(30));
 
-  ctx.strokeStyle = '#2c2c2a';
-  ctx.lineWidth = 1;
-  ctx.setLineDash([4, 4]);
+  ctx.strokeStyle = '#2c2c2a'; ctx.lineWidth = 1; ctx.setLineDash([4, 4]);
   [30, 70].forEach(level => {
     const y = yAt(level);
     ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
   });
   ctx.setLineDash([]);
 
-  ctx.fillStyle = '#898781';
-  ctx.font = '10px Menlo, "Courier New", monospace';
+  ctx.fillStyle = '#898781'; ctx.font = '10px Menlo, "Courier New", monospace';
   [0, 30, 70, 100].forEach(level => { ctx.fillText(String(level), 4, yAt(level) + 4); });
 
   const xTicks = Math.min(4, validIdx.length - 1);
@@ -984,9 +1029,7 @@ function drawRSIChart(canvas, rsi14) {
     ctx.fillText(rsi14[idx] != null ? String(idx) : '', Math.max(pad.left, xAt(idx) - 12), height - 4);
   }
 
-  ctx.beginPath();
-  ctx.strokeStyle = '#4e9af1';
-  ctx.lineWidth = 1.5;
+  ctx.beginPath(); ctx.strokeStyle = '#4e9af1'; ctx.lineWidth = 1.5;
   let started = false;
   rsi14.forEach((v, i) => {
     if (v == null) return;
@@ -996,8 +1039,7 @@ function drawRSIChart(canvas, rsi14) {
 
   const lastRsi = rsi14[rsi14.length - 1] ?? [...rsi14].reverse().find(v => v != null);
   if (lastRsi != null) {
-    ctx.fillStyle = '#4e9af1';
-    ctx.font = 'bold 11px Menlo, "Courier New", monospace';
+    ctx.fillStyle = '#4e9af1'; ctx.font = 'bold 11px Menlo, "Courier New", monospace';
     ctx.fillText(lastRsi.toFixed(1), width - pad.right + 4, yAt(lastRsi) + 4);
   }
 }
@@ -1015,23 +1057,18 @@ function drawComparisonChart(canvas, stockDataArr) {
   const series = stockDataArr.map(({ priceData }) =>
     priceData.map(b => (b.close / priceData[0].close) * 100)
   );
-
   const allV = series.flat();
-  const minV = Math.min(...allV);
-  const maxV = Math.max(...allV);
+  const minV = Math.min(...allV), maxV = Math.max(...allV);
   const vpad = (maxV - minV) * 0.08 || 1;
-  const yMin = minV - vpad;
-  const yMax = maxV + vpad;
+  const yMin = minV - vpad, yMax = maxV + vpad;
 
   const n = Math.max(...stockDataArr.map(s => s.priceData.length));
   const xStep = n > 1 ? cw / (n - 1) : 0;
   const xAt = i => pad.left + i * xStep;
   const yAt = v => pad.top + ch * (1 - (v - yMin) / (yMax - yMin));
 
-  ctx.strokeStyle = '#2c2c2a';
-  ctx.fillStyle = '#898781';
-  ctx.font = '11px Menlo, "Courier New", monospace';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#2c2c2a'; ctx.fillStyle = '#898781';
+  ctx.font = '11px Menlo, "Courier New", monospace'; ctx.lineWidth = 1;
   for (let step = 0; step <= 4; step++) {
     const v = yMin + (yMax - yMin) * (step / 4);
     const y = yAt(v);
@@ -1040,8 +1077,7 @@ function drawComparisonChart(canvas, stockDataArr) {
   }
 
   if (yMin < 100 && yMax > 100) {
-    ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-    ctx.setLineDash([4, 4]);
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.setLineDash([4, 4]);
     ctx.beginPath(); ctx.moveTo(pad.left, yAt(100)); ctx.lineTo(width - pad.right, yAt(100)); ctx.stroke();
     ctx.setLineDash([]);
   }
@@ -1055,16 +1091,11 @@ function drawComparisonChart(canvas, stockDataArr) {
   }
 
   series.forEach((vals, idx) => {
-    const color = TICKER_COLORS[idx];
-    ctx.beginPath(); ctx.strokeStyle = color; ctx.lineWidth = 2;
-    vals.forEach((v, i) => {
-      if (i === 0) ctx.moveTo(xAt(i), yAt(v)); else ctx.lineTo(xAt(i), yAt(v));
-    });
+    ctx.beginPath(); ctx.strokeStyle = TICKER_COLORS[idx]; ctx.lineWidth = 2;
+    vals.forEach((v, i) => { if (i === 0) ctx.moveTo(xAt(i), yAt(v)); else ctx.lineTo(xAt(i), yAt(v)); });
     ctx.stroke();
-    const lastVal = vals[vals.length - 1];
-    ctx.fillStyle = color;
-    ctx.font = 'bold 11px Menlo, "Courier New", monospace';
-    ctx.fillText(stockDataArr[idx].ticker, width - pad.right + 6, yAt(lastVal) + 4);
+    ctx.fillStyle = TICKER_COLORS[idx]; ctx.font = 'bold 11px Menlo, "Courier New", monospace';
+    ctx.fillText(stockDataArr[idx].ticker, width - pad.right + 6, yAt(vals[vals.length - 1]) + 4);
   });
 }
 
@@ -1078,13 +1109,12 @@ function drawRollingCorrelChart(canvas, stockDataArr) {
   const minLen = Math.min(...returnArrays.map(r => r.length));
   const aligned = returnArrays.map(r => r.slice(r.length - minLen));
 
-  const windowDays = 30;
   const pairs = [];
   for (let i = 0; i < stockDataArr.length; i++) {
     for (let j = i + 1; j < stockDataArr.length; j++) {
       pairs.push({
         label: `${stockDataArr[i].ticker}–${stockDataArr[j].ticker}`,
-        data: rollingCorrelation(aligned[i], aligned[j], windowDays),
+        data: rollingCorrelation(aligned[i], aligned[j], 30),
         color: TICKER_COLORS[pairs.length % TICKER_COLORS.length],
       });
     }
@@ -1099,30 +1129,24 @@ function drawRollingCorrelChart(canvas, stockDataArr) {
   const xAt = i => pad.left + i * xStep;
   const yAt = v => pad.top + ch * (1 - (v + 1) / 2);
 
-  ctx.strokeStyle = '#2c2c2a';
-  ctx.fillStyle = '#898781';
-  ctx.font = '10px Menlo, "Courier New", monospace';
-  ctx.lineWidth = 1;
+  ctx.strokeStyle = '#2c2c2a'; ctx.fillStyle = '#898781';
+  ctx.font = '10px Menlo, "Courier New", monospace'; ctx.lineWidth = 1;
   [-1, -0.5, 0, 0.5, 1].forEach(v => {
     const y = yAt(v);
     ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
     ctx.fillText(v.toFixed(1), 4, y + 3);
   });
 
-  ctx.strokeStyle = 'rgba(255,255,255,0.15)';
-  ctx.setLineDash([3, 3]);
+  ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.setLineDash([3, 3]);
   ctx.beginPath(); ctx.moveTo(pad.left, yAt(0)); ctx.lineTo(width - pad.right, yAt(0)); ctx.stroke();
   ctx.setLineDash([]);
 
-  // Date labels from last minLen bars of first stock
-  const refPriceData = stockDataArr[0].priceData;
-  const refDates = refPriceData.slice(refPriceData.length - minLen);
+  const refDates = stockDataArr[0].priceData.slice(stockDataArr[0].priceData.length - minLen);
   ctx.fillStyle = '#898781';
   const xTicks = Math.min(6, n - 1);
   for (let t = 0; t <= xTicks; t++) {
     const i = Math.round((n - 1) * (t / xTicks));
-    const d = refDates[i]?.date?.slice(5) ?? '';
-    ctx.fillText(d, Math.max(pad.left, xAt(i) - 18), height - 6);
+    ctx.fillText(refDates[i]?.date?.slice(5) ?? '', Math.max(pad.left, xAt(i) - 18), height - 6);
   }
 
   pairs.forEach(({ label, data, color }, idx) => {
@@ -1133,11 +1157,9 @@ function drawRollingCorrelChart(canvas, stockDataArr) {
       if (!started) { ctx.moveTo(xAt(i), yAt(v)); started = true; } else { ctx.lineTo(xAt(i), yAt(v)); }
     });
     ctx.stroke();
-
     const lastVal = [...data].reverse().find(v => v != null);
     if (lastVal != null) {
-      ctx.fillStyle = color;
-      ctx.font = '10px Menlo, "Courier New", monospace';
+      ctx.fillStyle = color; ctx.font = '10px Menlo, "Courier New", monospace';
       ctx.fillText(label, width - pad.right + 4, yAt(lastVal) + 4 + idx * 14);
     }
   });
@@ -1158,7 +1180,6 @@ function drawWeightsChart(canvas, tickers, weights) {
 
   ctx.font = '11px Menlo, "Courier New", monospace';
   ctx.textAlign = 'center';
-
   weights.forEach((w, i) => {
     const x = pad.left + i * slotW + (slotW - barW) / 2;
     const barH = ch * w;
@@ -1169,6 +1190,93 @@ function drawWeightsChart(canvas, tickers, weights) {
     ctx.fillStyle = '#898781';
     ctx.fillText(tickers[i], x + barW / 2, height - 8);
   });
-
   ctx.textAlign = 'left';
+}
+
+function drawEfficientFrontier(canvas, portfolioData) {
+  const s = setupCanvas(canvas);
+  if (!s) return;
+  const { ctx, width, height } = s;
+  ctx.clearRect(0, 0, width, height);
+
+  const { samples, maxSharpe, minVariance } = portfolioData;
+  const pad = { top: 20, right: 20, bottom: 40, left: 60 };
+  const cw = width - pad.left - pad.right;
+  const ch = height - pad.top - pad.bottom;
+
+  const vols = samples.map(p => p.vol);
+  const rets = samples.map(p => p.ret);
+  const sharpes = samples.map(p => p.sharpe);
+
+  const xMin = Math.min(...vols) * 0.92;
+  const xMax = Math.max(...vols) * 1.05;
+  const yMin = Math.min(...rets) - (Math.max(...rets) - Math.min(...rets)) * 0.08;
+  const yMax = Math.max(...rets) + (Math.max(...rets) - Math.min(...rets)) * 0.08;
+
+  const xAt = v => pad.left + ((v - xMin) / (xMax - xMin)) * cw;
+  const yAt = v => pad.top + ((yMax - v) / (yMax - yMin)) * ch;
+
+  // Sharpe range for color normalization
+  const sMin = Math.min(...sharpes);
+  const sMax = Math.max(...sharpes);
+  const tNorm = s => sMax > sMin ? (s - sMin) / (sMax - sMin) : 0.5;
+
+  function sharpeColor(t) {
+    // red (#e66767) → yellow (#f4b942) → green (#0ca30c)
+    if (t < 0.5) {
+      const tt = t * 2;
+      return `rgb(${Math.round(230 + 14 * tt)},${Math.round(103 + 82 * tt)},${Math.round(103 - 37 * tt)})`;
+    } else {
+      const tt = (t - 0.5) * 2;
+      return `rgb(${Math.round(244 - 232 * tt)},${Math.round(185 - 22 * tt)},${Math.round(66 - 54 * tt)})`;
+    }
+  }
+
+  // Grid
+  ctx.strokeStyle = '#2c2c2a'; ctx.lineWidth = 1;
+  ctx.fillStyle = '#898781'; ctx.font = '10px Menlo, "Courier New", monospace';
+  for (let step = 0; step <= 4; step++) {
+    const v = yMin + (yMax - yMin) * (step / 4);
+    const y = yAt(v);
+    ctx.beginPath(); ctx.moveTo(pad.left, y); ctx.lineTo(width - pad.right, y); ctx.stroke();
+    ctx.fillText((v * 100).toFixed(1) + '%', 4, y + 3);
+  }
+  for (let step = 0; step <= 4; step++) {
+    const v = xMin + (xMax - xMin) * (step / 4);
+    const x = xAt(v);
+    ctx.beginPath(); ctx.moveTo(x, pad.top); ctx.lineTo(x, height - pad.bottom); ctx.stroke();
+    ctx.fillText((v * 100).toFixed(1) + '%', Math.max(pad.left, x - 16), height - pad.bottom + 14);
+  }
+
+  // Axis labels
+  ctx.fillStyle = '#898781'; ctx.font = '10px Menlo, "Courier New", monospace';
+  ctx.save(); ctx.translate(12, height / 2); ctx.rotate(-Math.PI / 2);
+  ctx.textAlign = 'center'; ctx.fillText('Ann. Return', 0, 0); ctx.restore();
+  ctx.textAlign = 'center';
+  ctx.fillText('Ann. Volatility', pad.left + cw / 2, height - 2);
+  ctx.textAlign = 'left';
+
+  // Scatter dots (small)
+  samples.forEach(p => {
+    ctx.beginPath();
+    ctx.arc(xAt(p.vol), yAt(p.ret), 2, 0, Math.PI * 2);
+    ctx.fillStyle = sharpeColor(tNorm(p.sharpe)) + '99'; // semi-transparent
+    ctx.fill();
+  });
+
+  // Highlight: Max Sharpe (gold star shape via larger circle)
+  const msX = xAt(maxSharpe.portVol), msY = yAt(maxSharpe.portReturn);
+  ctx.beginPath(); ctx.arc(msX, msY, 7, 0, Math.PI * 2);
+  ctx.fillStyle = '#f4b942'; ctx.fill();
+  ctx.strokeStyle = '#0d0d0d'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#f4b942'; ctx.font = 'bold 10px Menlo, "Courier New", monospace';
+  ctx.fillText('★ Max Sharpe', msX + 10, msY + 4);
+
+  // Highlight: Min Variance (blue diamond)
+  const mvX = xAt(minVariance.portVol), mvY = yAt(minVariance.portReturn);
+  ctx.beginPath(); ctx.arc(mvX, mvY, 7, 0, Math.PI * 2);
+  ctx.fillStyle = '#4e9af1'; ctx.fill();
+  ctx.strokeStyle = '#0d0d0d'; ctx.lineWidth = 1.5; ctx.stroke();
+  ctx.fillStyle = '#4e9af1'; ctx.font = 'bold 10px Menlo, "Courier New", monospace';
+  ctx.fillText('◆ Min Variance', mvX + 10, mvY + 4);
 }
