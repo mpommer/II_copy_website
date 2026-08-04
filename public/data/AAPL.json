@@ -1,0 +1,54 @@
+{
+  "meta": {
+    "symbol": "AAPL",
+    "reporting_company": "Apple",
+    "report_date": "2026-04-30",
+    "quarter": "Q2 FY2026"
+  },
+  "sentiment": {
+    "overall": {
+      "positive_count": 56,
+      "negative_count": 14,
+      "total_words": 8748,
+      "label": "positive"
+    },
+    "by_role": [
+      { "role_group": "Company", "sentiment_density": 0.0339 },
+      { "role_group": "Analyst", "sentiment_density": 0.0024 }
+    ],
+    "most_positive_speakers": [
+      { "speaker": "John Ternus", "sentiment_density": 0.0574 },
+      { "speaker": "Tim Cook", "sentiment_density": 0.0492 },
+      { "speaker": "Kevan Parekh", "sentiment_density": 0.0374 }
+    ],
+    "most_negative_speakers": [
+      { "speaker": "Ben Reitzes", "sentiment_density": -0.0089 },
+      { "speaker": "Wamsi Mohan", "sentiment_density": -0.0084 },
+      { "speaker": "Samik Chatterjee", "sentiment_density": -0.0056 }
+    ]
+  },
+  "key_figures": [
+    { "figure": "$111.2B", "metric": "Total revenue", "sub": "+17% YoY · March quarter record" },
+    { "figure": "$57.0B",  "metric": "iPhone revenue", "sub": "+22% YoY · March quarter record" },
+    { "figure": "$31.0B",  "metric": "Services revenue", "sub": "+16% YoY · all-time record" },
+    { "figure": "$8.4B",   "metric": "Mac revenue", "sub": "+6% YoY" },
+    { "figure": "49.3%",   "metric": "Gross margin", "sub": "Above guidance high end" },
+    { "figure": "$2.01",   "metric": "Diluted EPS", "sub": "+22% YoY · March quarter record" },
+    { "figure": "$28.7B",  "metric": "Operating cash flow", "sub": "Strong quarter" },
+    { "figure": "2.5B",    "metric": "Active devices", "sub": "All-time high" },
+    { "figure": "+14–17%", "metric": "June Q revenue guidance", "sub": "Includes supply constraint impact" },
+    { "figure": "47.5–48.5%", "metric": "June Q gross margin guidance", "sub": "Memory cost headwind" }
+  ],
+  "forward_looking": [
+    { "speaker": "Kevan Parekh", "statement": "We expect our June quarter total company revenue to grow by 14%–17% year-over-year, which comprehends our best view of constrained supply." },
+    { "speaker": "Kevan Parekh", "statement": "We expect gross margin to be between 47.5% and 48.5%." },
+    { "speaker": "Tim Cook", "statement": "We expect significantly higher memory costs. They are also partly offset by the benefit of carry-in inventory." },
+    { "speaker": "Tim Cook", "statement": "We believe memory costs will drive an increasing impact on our business. We'll look at a range of options." },
+    { "speaker": "Tim Cook", "statement": "The Mac mini and the Mac Studio may take several months to reach supply-demand balance." },
+    { "speaker": "Tim Cook", "statement": "We look forward to bringing a more personalized Siri to users coming this year." },
+    { "speaker": "Kevan Parekh", "statement": "We believe AI is a really important investment area for Apple, and we're going to be doing that incrementally on top of what we normally invest in our product roadmap." },
+    { "speaker": "Kevan Parekh", "statement": "We expect services revenue to grow at a year-over-year rate similar to what we reported in the March quarter after removing the favorable year-over-year impact from foreign exchange tailwinds." }
+  ],
+  "companies_mentioned": ["Google", "Microsoft", "TSMC", "Perplexity", "Morgan Stanley", "Goldman Sachs", "JP Morgan"],
+  "key_products": ["iPhone 17", "MacBook Neo", "Mac mini", "Mac Studio", "Services", "Apple Intelligence", "iPad Air", "AirPods Pro 3"]
+}
