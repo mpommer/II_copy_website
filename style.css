@@ -120,12 +120,33 @@ button:hover {
   color: var(--error);
 }
 
+.status-loading {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.alert {
+  border: 1px solid var(--error);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  background: rgba(230, 103, 103, 0.08);
+  color: var(--error);
+}
+
+.alert strong {
+  color: var(--ink);
+}
+
 .app-footer {
   max-width: 960px;
   margin: 0 auto;
   padding: 0 1.5rem 2rem;
   font-size: 0.85rem;
   color: var(--faint);
+}
+
+.app-footer a {
+  color: var(--accent);
 }
 
 #results h2 {
@@ -220,4 +241,11 @@ button:hover {
   margin: 0 0 0.5rem;
   font-size: 1rem;
   color: var(--ink);
+}
+
+.note-panel .disclaimer {
+  margin: 0.5rem 0 0;
+  font-size: 0.7rem;
+  font-style: italic;
+  color: var(--faint);
 }

@@ -19,7 +19,7 @@ form.addEventListener('submit', async (event) => {
   const twelveDataKey = document.getElementById('twelvedata-key').value.trim();
   const openRouterKey = document.getElementById('openrouter-key').value.trim();
 
-  results.innerHTML = '<p>Loading...</p>';
+  results.innerHTML = '<p class="status-loading">Fetching price history and generating your research note…</p>';
 
   try {
     const priceData = await fetchPriceData(ticker, twelveDataKey);
@@ -29,7 +29,7 @@ form.addEventListener('submit', async (event) => {
     const note = await getResearchNote(ticker, priceData, stats, openRouterKey);
     renderResults(ticker, priceData, sma20, sma50, stats, note);
   } catch (err) {
-    results.innerHTML = `<p class="error">Something went wrong: ${err.message}</p>`;
+    results.innerHTML = `<div class="alert"><strong>Something went wrong.</strong> ${err.message}</div>`;
   }
 });
 
@@ -232,6 +232,7 @@ function renderResults(ticker, priceData, sma20, sma50, stats, note) {
     <div class="note-panel">
       <h3>Research note</h3>
       <p class="note">${note}</p>
+      <p class="disclaimer">AI-generated summary based on the price data above — not financial advice.</p>
     </div>
   `;
 
